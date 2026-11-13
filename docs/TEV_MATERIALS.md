@@ -4,6 +4,14 @@ Lost Coast's world geometry uses two Source shaders. The GameCube has no
 programmable shaders, so each shader *feature* is ported as a fixed TEV
 recipe (stages, texgens, constant registers) selected per material.
 
+Theory crosswalk: Mitchell / McTaggart / Green, *Shading in Valve’s Source
+Engine* (SIGGRAPH 2006) — see
+[Chapter7-Shading-in-Valves-Source-Engine.pdf](Chapter7-Shading-in-Valves-Source-Engine.pdf).
+Key takeaways we honour: radiosity lightmaps carry the world look; world
+specular is image-based (cubes), not many local lights; Lost Coast HDR is
+LDR framebuffer + bloom. Radiosity Normal Mapping (3-basis LMs) does not
+fit Flipper memory — we approximate with baked relief / IndTex instead.
+
 Inventory of the materials the bake touches (`cache/extracted/materials`):
 
 | Source shader | Materials | Features on top of diffuse × lightmap |
@@ -33,7 +41,7 @@ Disable at runtime with `-gcnotevmat`.
 | `$detail` mode 0 (mod2x), `$detailscale`, `$detailblendfactor` | **done** | one stage `CPREV × TEXC(detail) × 2`; UV = diffuse ST through a scale texture matrix (no vertex data); blend factor folded into the I8 texel around 0.5; mips fade to neutral | +1 stage, +1 texgen, 5.4 KB per detail texture (max 4) |
 | `$alphatest`, `$alphatestreference` | **done** | CMPR 1-bit alpha, `GX_SetAlphaCompare(GEQUAL, ref)`, Z after texture | 0 stages |
 | `$envmap` + `$normalmapalphaenvmapmask` + `$bumpmap` (wet sand) | done (engine, sand only) | sky/sun texture × (mask × `$envmaptint`) added to lit colour, sky ST warped by the normal map through an indirect stage | +2 stages, 1 ind stage |
-| `$envmap` + `$basealphaenvmapmask` (metal, plaster, frescos) | **done** | additive pass: sun disc × `$envmaptint` × shared 64² I4 mask from base alpha (CMPR alpha is 1-bit); trailer `GCem` in `tevmat.gcm` (max 4 masks) | +2 stages, 2 KB per mask |
+| `$envmap` + `$basealphaenvmapmask` (metal, plaster, frescos) | **done** | additive pass: sun disc × `$envmaptint` × shared 64² I4 mask from base alpha (CMPR alpha is 1-bit); trailer `GCem` in `tevmat.gcm` (max 8 masks) | +2 stages, 2 KB per mask |
 | `$bumpmap` without envmap (rock, cliffs) | next | emboss: `lit × (0.5 + h(uv) − h(uv + d)) × 2` with `h` = normal-map-derived height (I8), `d` = per-face sun direction in tangent space loaded as a texture matrix | +2 stages, +1 texgen |
 | WorldVertexTransition `$basetexture2` | **done** | second alpha-blended draw of `$basetexture2` weighted by displacement vertex alpha (world DL v2) | +1 draw on blend batches |
 | `$parallaxmap` | not planned | no cheap fixed-function equivalent; visually minor at 480p | — |
