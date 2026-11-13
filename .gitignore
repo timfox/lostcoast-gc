@@ -1,0 +1,9 @@
+cache/
+out/
+playtests/screenshots/
+playtests/videos/
+*.iso
+*.dol
+__pycache__/
+*.pyc
+.waf*
