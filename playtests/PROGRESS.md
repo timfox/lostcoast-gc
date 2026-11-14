@@ -200,3 +200,9 @@
 | 2026-11-13 21:06 | ropes-courtyard | 111.8 | notes/dolphin-probe-20261113-210512/compare-vs-retail.jpg | notes/dolphin-probe-20261113-210512/clip.mp4 | Still eye in the monastery courtyard looking up at the lamp cables |
 | 2026-11-13 21:10 | ropes | vst | notes/vst-20261113-210943/vst-sheet.jpg | notes/vst-20261113-210943/vst.mp4 | Ropes and cables as sagging line strips; deduplicated world textures; 90 full-size texture slots (frames=6816 unique=6788 luma_mean=79.5 luma_min=0.0 luma_max=144.0) |
 | 2026-11-13 21:18 | overlays | vst | notes/vst-20261113-211749/vst-sheet.jpg | notes/vst-20261113-211749/vst.mp4 | Overlay decals (graffiti, plaster) baked into the world as alpha-tested quads (frames=6826 unique=6798 luma_mean=79.5 luma_min=0.0 luma_max=144.1) |
+| 2026-11-13 21:21 | graffiti-wall | 79.2 | notes/dolphin-probe-20261113-212018/compare-vs-retail.jpg |  | Still eye facing the courtyard wall with graffiti overlays |
+| 2026-11-13 21:27 | no-viewmodel | vst | notes/dolphin-probe-20261113-212223/vst-sheet.jpg | notes/dolphin-probe-20261113-212223/vst.mp4 | Flythrough draws no viewmodel (its skin is not resident and drew as a white hook) (frames=6811 unique=6787 luma_mean=79.6 luma_min=0.0 luma_max=144.1) |
+| 2026-11-13 21:27 | sand-retail-eye | 44.0 | notes/dolphin-probe-20261113-212712/compare-vs-retail.jpg |  | Retail spawn eye on the beach, for sand comparison |
+| 2026-11-13 21:29 | sand-spec | 42.9 | notes/dolphin-probe-20261113-212857/compare-vs-retail.jpg |  | Wet sand: hardware specular gated by the sand texture |
+| 2026-11-13 21:31 | sand-glare | 64.4 | notes/dolphin-probe-20261113-213040/compare-vs-retail.jpg |  | Wet sand: sun glare projected at the mirror point, gated by the sand texture |
+| 2026-11-13 21:32 | sand-glare | 51.4 | notes/dolphin-probe-20261113-213148/compare-vs-retail.jpg |  | Wet sand: sun glare projected at the mirror point, gated by the sand texture |
