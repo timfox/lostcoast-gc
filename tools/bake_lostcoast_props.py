@@ -893,7 +893,7 @@ def bake_props(
 	piece_blob = bytearray()
 	far_blob = bytearray()
 
-	def emit_pieces(pts, uvs, tris, tri_mat, ids, q, blob=None):
+	def emit_pieces(pts, uvs, tris, tri_mat, ids, q, blob=None, piece_flags=0):
 		blob = piece_blob if blob is None else blob
 		by_mat: dict[int, list] = {}
 		for ti, (a, b, c) in enumerate(tris):
@@ -935,7 +935,7 @@ def bake_props(
 		total = 0
 		for n, (mid, nverts, body) in enumerate(pieces):
 			nxt = (32 + len(pieces[n + 1][2])) if n + 1 < len(pieces) else 0
-			blob.extend(struct.pack(">BBHII", mid, 0, nverts, len(body), nxt) + b"\0" * 20)
+			blob.extend(struct.pack(">BBHII", mid, piece_flags, nverts, len(body), nxt) + b"\0" * 20)
 			blob.extend(body)
 			total += nverts // 3
 		return dl_ofs, 32 + len(pieces[0][2]), total
@@ -949,7 +949,10 @@ def bake_props(
 		while frac < 6 and ext * (1 << (frac + 1)) <= 32000.0:
 			frac += 1
 		q = float(1 << frac)
-		full = emit_pieces(pts, mesh.uvs, mesh.tris, mesh.tri_mat, ids, q)
+		# Piece flag 1: wet rock. The engine adds cool glints on the bright
+		# flecks and veins of its texture (retail: $envmap + $bumpmap).
+		pf = 1 if "rock" in str(key).lower() else 0
+		full = emit_pieces(pts, mesh.uvs, mesh.tris, mesh.tri_mat, ids, q, piece_flags=pf)
 		if full is None:
 			return None
 		# Far LOD: about a sixth of the triangles, welded on a coarser grid.
@@ -973,10 +976,10 @@ def bake_props(
 				if 0 < len(lt) <= target or (div == 3 and lt):
 					# The coarsest grid is taken even when it is over the
 					# target: a full copy here cost 400 KB.
-					far = emit_pieces(lp, lu, lt, lm, ids, q, far_blob)
+					far = emit_pieces(lp, lu, lt, lm, ids, q, far_blob, piece_flags=pf)
 					break
 		if far is None:
-			far = emit_pieces(pts, mesh.uvs, mesh.tris, mesh.tri_mat, ids, q, far_blob)
+			far = emit_pieces(pts, mesh.uvs, mesh.tris, mesh.tri_mat, ids, q, far_blob, piece_flags=pf)
 		model_index[key] = len(model_recs)
 		model_recs.append((full[0], full[1], full[2], frac, far[0], far[1], far[2]))
 		return model_index[key]

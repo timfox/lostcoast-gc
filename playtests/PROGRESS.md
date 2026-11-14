@@ -212,3 +212,6 @@
 | 2026-11-13 21:43 | water-glare | 53.7 | notes/dolphin-probe-20261113-214220/compare-vs-retail.jpg |  | Sun glare projected on the water plane |
 | 2026-11-13 21:47 | sand-water-glare | vst | notes/dolphin-probe-20261113-214318/vst-sheet.jpg | notes/dolphin-probe-20261113-214318/vst.mp4 | Wet sand glare, shoreline depth fade, sun glare on water, light shafts as additive (frames=6787 unique=6761 luma_mean=82.1 luma_min=0.0 luma_max=144.0) |
 | 2026-11-13 21:48 | water-ripple-glare | 46.1 | notes/dolphin-probe-20261113-214747/compare-vs-retail.jpg |  | Water glare broken into ripple streaks; sand glare toned down; sky at full brightness |
+| 2026-11-13 21:51 | rock-glint | 77.5 | notes/dolphin-probe-20261113-215039/compare-vs-retail.jpg |  | Rock props: additive glint on the bright flecks of the rock texture |
+| 2026-11-13 21:53 | rock-glint | 79.0 | notes/dolphin-probe-20261113-215308/compare-vs-retail.jpg |  | Rock props: additive glint on the bright flecks of the rock texture |
+| 2026-11-13 21:55 | rock-glint | 76.6 | notes/dolphin-probe-20261113-215428/compare-vs-retail.jpg |  | Rock props: cool glint on the bright flecks of the rock texture |
