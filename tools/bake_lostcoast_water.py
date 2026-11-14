@@ -246,6 +246,8 @@ def bake_water(map_bsp: Path, lostcoast: Path, hl2: Path, out_dir: Path) -> None
 		# Layer 1 scroll (VMT $scroll1) in the record; engine uses it for the dudv warp.
 		struct.pack_into(">ff", rec, 8, params["scroll1"][0], params["scroll1"][1])
 		v0, v1 = texinfo["vecs"]
+		tdw = float(max(1, bsp["texdatas"][texinfo["texdata"]]["width"]))
+		tdh = float(max(1, bsp["texdatas"][texinfo["texdata"]]["height"]))
 		for i in range(GC_CAP_MAX_VERTS):
 			if i < nv:
 				p = dpts[i]
@@ -263,8 +265,11 @@ def bake_water(map_bsp: Path, lostcoast: Path, hl2: Path, out_dir: Path) -> None
 					">hh",
 					rec,
 					64 + i * 4,
-					int(max(-32767, min(32767, round(s / 2.0)))),
-					int(max(-32767, min(32767, round(t / 2.0)))),
+					# Source's own texture coordinate (texels over the material's
+					# texdata size), x64: the water shader's bump lookups are
+					# written in these units.
+					int(max(-32767, min(32767, round(s / tdw * 64.0)))),
+					int(max(-32767, min(32767, round(t / tdh * 64.0)))),
 				)
 		struct.pack_into(">ffff", rec, 96, float(n[0]), float(n[1]), float(n[2]), float(dist))
 		# Body tint = VMT $fogcolor (retail cheap water). Runtime lifts +
@@ -292,7 +297,7 @@ def bake_water(map_bsp: Path, lostcoast: Path, hl2: Path, out_dir: Path) -> None
 	print(f"  wrote {path} faces={len(cands)} bytes={path.stat().st_size}")
 
 
-def write_water_ia8(vpks, media: Path, size: int = 128) -> None:
+def write_water_ia8(vpks, media: Path, size: int = 64) -> None:
 	"""Lost Coast $normalmap as GX IA8. CMPR quantizes the bump and the
 	indirect warp falls apart; IA8 keeps the 128-neutral du/dv."""
 	from PIL import Image
