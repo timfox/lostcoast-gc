@@ -958,6 +958,12 @@ def bake_props(
 		# At most 96 triangles: a far instance is under 5 % of the view, and
 		# the whole region has to fit in about 250 KB of MEM1.
 		target = max(8, min(96, len(mesh.tris) // 8))
+		if any(k in str(key).lower() for k in (
+			"village", "shipwreck", "refinery", "monastery01", "dome", "drydock",
+			"boat_fishing", "dock_", "bridge", "destroyed", "cloister",
+		)):
+			# Landmarks stay readable across the harbor on their far chain.
+			target = max(target, min(800, len(mesh.tris) // 4))
 		if len(mesh.tris) > 16:
 			for div in (48, 40, 32, 28, 24, 20, 16, 14, 12, 10, 8, 6, 5, 4, 3):
 				lp, lu, lt, lm = _cluster_tris(pts, mesh.uvs, mesh.tris, mesh.tri_mat, div)
