@@ -77,7 +77,10 @@ preview = Image.new("RGB", (SIZE * 6, SIZE))
 for i, side in enumerate(sides):
 	img = None
 	used = None
-	for stem in (f"sky_lostcoast_hdr{side}", f"sky_lostcoast{side}"):
+	# LDR set first. The HDR set through exposure 6 + Reinhard came out
+	# near white (top 150,179,203); retail's sky top is (68,98,140) and the
+	# LDR art sits at (84,114,153), so it only needs a small pull-down.
+	for stem in (f"sky_lostcoast{side}", f"sky_lostcoast_hdr{side}"):
 		raw = read_first(vpks, f"materials/skybox/{stem}.vtf")
 		if not raw:
 			continue
@@ -92,6 +95,8 @@ for i, side in enumerate(sides):
 	if img is None:
 		raise SystemExit(f"missing/undecodable sky side {side}")
 	img = img.resize((SIZE, SIZE), Image.Resampling.LANCZOS)
+	if used and "_hdr" not in used:
+		img = Image.fromarray((np.asarray(img).astype(np.float32) * 0.86).clip(0, 255).astype(np.uint8))
 	preview.paste(img, (i * SIZE, 0))
 	cmpr = gx_cmpr_encode(np.asarray(img))
 	assert len(cmpr) == SIZE * SIZE // 2, len(cmpr)

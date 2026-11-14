@@ -31,7 +31,7 @@ GC_PR_MAX_TRIS = 65535
 GC_PR_MODEL_TRIS = 105000  # unique model triangles (30 B each in ARAM)
 GC_PR_PIECE_TRIS = 512  # one piece = 32 B header + verts, fits the 16 KB bounce
 GC_PR_MAX_INST = 512
-GC_PR_MAX_MAT = 96
+GC_PR_MAX_MAT = 127
 PROP_CLASSNAMES = {"prop_physics", "prop_dynamic", "prop_static"}
 # CapFaces lean stand-ins: Source NPCs / canisters have no GoldSrc LINK_ENTITY,
 # so they bake into the GCpr pack as posed meshes (same path as boats/rocks).
