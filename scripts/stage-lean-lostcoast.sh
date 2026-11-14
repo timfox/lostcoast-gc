@@ -110,6 +110,16 @@ if [[ -f "$BAKE/media/dp_${MAP}.gcx" ]]; then
 	cp -a "$BAKE/media/dp_${MAP}.gcx" "$STAGE/media/"
 	echo "  + water depth map dp_${MAP}.gcx"
 fi
+if [[ ! -f "$BAKE/media/ss_${MAP}.gcs" || "$SCRIPT_DIR/../tools/bake_lostcoast_soundscape.py" -nt "$BAKE/media/ss_${MAP}.gcs" ]]; then
+	python3 "$SCRIPT_DIR/../tools/bake_lostcoast_soundscape.py" \
+		--map "$LCGC_CONTENT_LOSTCOAST/maps/${MAP}.bsp" \
+		--lostcoast "$LCGC_CONTENT_LOSTCOAST" --hl2 "${LCGC_CONTENT_HL2:-$LCGC_ROOT/content/hl2}" \
+		--out "$BAKE/media" || true
+fi
+if [[ -f "$BAKE/media/ss_${MAP}.gcs" ]]; then
+	cp -a "$BAKE/media/ss_${MAP}.gcs" "$STAGE/media/"
+	echo "  + soundscape pack ss_${MAP}.gcs"
+fi
 if [[ -f "$BAKE/media/fx_${MAP}.gcf" ]]; then
 	cp -a "$BAKE/media/fx_${MAP}.gcf" "$STAGE/media/"
 	echo "  + smoke emitters fx_${MAP}.gcf"
@@ -212,16 +222,8 @@ EOF
 mkdir -p "$STAGE/gfx" "$STAGE/sound" "$STAGE/resource"
 : > "$STAGE/resource/.keep"
 
-# Source soundscapes → sound/ + tip-safe sound/sc_* oneshots (ASND stream bed).
-HL2_CONTENT="${LCGC_CONTENT_HL2:-$LCGC_ROOT/content/hl2}"
-if [[ -d "$LCGC_CONTENT_LOSTCOAST" && -d "$HL2_CONTENT" ]]; then
-	python3 "$SCRIPT_DIR/stage_lostcoast_audio.py" \
-		--stage "$STAGE" \
-		--lostcoast "$LCGC_CONTENT_LOSTCOAST" \
-		--hl2 "$HL2_CONTENT"
-else
-	echo "  (skip audio: need LCGC_CONTENT_LOSTCOAST + hl2 content)"
-fi
+# Soundscapes ship as media/ss_<map>.gcs (tools/bake_lostcoast_soundscape.py).
+rm -f "$STAGE/soundscape.pk3"
 
 # Retail Lost Coast title plate (console/background01 → resource/gc_menu).
 TITLE_MENU="${LCGC_CACHE}/title/gc_menu"
