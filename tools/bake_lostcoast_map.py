@@ -644,6 +644,13 @@ def _material_aliases(mat_path: str) -> list[str]:
 	return uniq
 
 
+def _patch_base(mat_path: str) -> str:
+	"""maps/<map>/<path>_<x>_<y>_<z> → <path>. Anything else unchanged."""
+	mat = mat_path.replace("\\", "/").lower()
+	m = re.match(r"maps/[^/]+/(.+?)(?:_-?\d+){3}$", mat)
+	return m.group(1) if m else mat
+
+
 def material_canonical(mat_path: str) -> str:
 	"""Stable base path for TEV ids (strip maps/<map>/ and VBSP _x_y_z)."""
 	aliases = _material_aliases(mat_path)
@@ -1399,9 +1406,30 @@ def bake(
 	envmap_mats: dict[str, int] = {}  # mat path → specular strength byte
 	tex2_for_mat: dict[str, str] = {}  # WVT mat → short name of $basetexture2
 	needed_mats = {c[3] for pack in packs for c in pack}
+	# Every drawable face's material, not only the CapFaces candidates: the
+	# world DL draws the whole BSP, and the candidate filters (area, SURF_TRANS,
+	# pack membership) left 45 faces without a texture: metal rails, combine
+	# grates, a few monastery frescoes.
+	for _face in bsp["faces"]:
+		_ti = _face["texinfo"]
+		if _ti < 0 or _ti >= len(bsp["texinfos"]):
+			continue
+		_tx = bsp["texinfos"][_ti]
+		if _tx["flags"] & (SURF_SKY | SURF_WARP | SURF_NODRAW | SURF_HINT | SURF_SKIP | SURF_TRIGGER):
+			continue
+		_td = _tx["texdata"]
+		if _td < 0 or _td >= len(bsp["tex_names"]):
+			continue
+		_mat = bsp["tex_names"][_td]
+		if _mat.lower().startswith("tools/") or "water" in _mat.lower().split("/")[-1]:
+			continue
+		needed_mats.add(_mat)
 	tevmat_feats: dict[str, dict] = {}
 	for mat in sorted(needed_mats):
-		short = material_short_name(mat, name_map)
+		# VBSP cubemap patches (maps/<map>/..._x_y_z) only swap $envmap. They
+		# share the base material's texture: one pack entry, not one each
+		# (327 entries for about 150 distinct textures).
+		short = material_short_name(_patch_base(mat), name_map)
 		short_for_mat[mat] = short
 		vmt = _load_vmt_for_mat(vpks, mat, extract_dir)
 		feat = bake_tevmat.classify(vmt)
