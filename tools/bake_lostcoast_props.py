@@ -89,7 +89,11 @@ def _tri_cap(model: str, natural: int) -> int:
 		cap = 256
 	elif any(s in low for s in ("gate", "stair", "crate", "pallet", "crab")):
 		cap = 200
-	elif any(s in low for s in ("dome", "cloister", "shipwreck", "drydock", "village", "scaffold", "refinery", "bridge", "destroyed", "interior_")):
+	elif any(s in low for s in ("village", "shipwreck")):
+		# Landmarks of the cove view. At 960 triangles the houses welded
+		# into slabs and the wreck's ribs into spikes.
+		cap = 1000
+	elif any(s in low for s in ("dome", "cloister", "drydock", "scaffold", "refinery", "bridge", "destroyed", "interior_")):
 		cap = 240
 	elif "window" in low:
 		# A window is already a few hundred triangles. Cutting it to 80
@@ -140,25 +144,37 @@ def _cluster_tris(
 	sx = max(maxx - minx, 1e-3)
 	sy = max(maxy - miny, 1e-3)
 	sz = max(maxz - minz, 1e-3)
-	buckets: dict[tuple[int, int, int], list[int]] = {}
+	# Weld by position cell, but keep one vertex per UV neighbourhood inside
+	# a cell. Averaging the UVs of everything in a cell mixed islands of an
+	# atlas (the village clusters came out as crumpled foil).
+	cell_of: list[tuple[int, int, int]] = []
+	groups: dict[tuple, list[int]] = {}
+	cell_pts: dict[tuple[int, int, int], list[int]] = {}
 	for i, p in enumerate(positions):
 		key = (
 			min(div - 1, int((p[0] - minx) / sx * div)),
 			min(div - 1, int((p[1] - miny) / sy * div)),
 			min(div - 1, int((p[2] - minz) / sz * div)),
 		)
-		buckets.setdefault(key, []).append(i)
-	remap: dict[int, int] = {}
-	new_pos: list[tuple[float, float, float]] = []
-	new_uv: list[tuple[float, float]] = []
-	for ids in buckets.values():
-		ni = len(new_pos)
+		cell_of.append(key)
+		cell_pts.setdefault(key, []).append(i)
+		u, v = uvs[i]
+		groups.setdefault((key, int(round(u * 8.0)), int(round(v * 8.0))), []).append(i)
+	cell_pos = {}
+	for key, ids in cell_pts.items():
 		n = float(len(ids))
-		new_pos.append((
+		cell_pos[key] = (
 			sum(positions[i][0] for i in ids) / n,
 			sum(positions[i][1] for i in ids) / n,
 			sum(positions[i][2] for i in ids) / n,
-		))
+		)
+	remap: dict[int, int] = {}
+	new_pos: list[tuple[float, float, float]] = []
+	new_uv: list[tuple[float, float]] = []
+	for (key, _uq, _vq), ids in groups.items():
+		ni = len(new_pos)
+		n = float(len(ids))
+		new_pos.append(cell_pos[key])
 		new_uv.append((
 			sum(uvs[i][0] for i in ids) / n,
 			sum(uvs[i][1] for i in ids) / n,
@@ -169,14 +185,14 @@ def _cluster_tris(
 	new_mats: list[int] = []
 	seen: set[tuple] = set()
 	for t, m in zip(tris, mats):
-		a, b, c = remap[t[0]], remap[t[1]], remap[t[2]]
-		if a == b or b == c or c == a:
+		ca, cb, cc = cell_of[t[0]], cell_of[t[1]], cell_of[t[2]]
+		if ca == cb or cb == cc or cc == ca:
 			continue
-		key = (tuple(sorted((a, b, c))), m)
+		key = (tuple(sorted((ca, cb, cc))), m)
 		if key in seen:
 			continue
 		seen.add(key)
-		new_tris.append((a, b, c))
+		new_tris.append((remap[t[0]], remap[t[1]], remap[t[2]]))
 		new_mats.append(m)
 	return new_pos, new_uv, new_tris, new_mats
 
@@ -1036,6 +1052,10 @@ def bake_props(
 	write_gcwt(tex_path, chains)
 	print(f"  wrote {path} ({path.stat().st_size} bytes)")
 	print(f"  wrote {tex_path} ({tex_path.stat().st_size} bytes)")
+	# Model index → name, for audits of what the engine draws or drops.
+	import json
+	(out_dir.parent / "prop-models.json").write_text(json.dumps(
+		[k for k, _v in sorted(model_index.items(), key=lambda kv: kv[1])], indent=1))
 
 
 def main() -> None:
