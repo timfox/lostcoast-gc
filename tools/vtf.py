@@ -322,7 +322,12 @@ def decode_vtf(data: bytes, max_side: int | None = 256) -> VTFImage:
 			img = Image.fromarray(np.frombuffer(rgba, dtype=np.uint8).reshape(target_h, target_w, 4), "RGBA")
 			scale = min(max_side / target_w, max_side / target_h)
 			nw, nh = max(8, int(target_w * scale) & ~7), max(8, int(target_h * scale) & ~7)
-			img = img.resize((nw, nh), Image.Resampling.BILINEAR)
+			# Colour and alpha separately. Pillow premultiplies RGBA before
+			# it filters, so a texture whose alpha is a spec or env mask
+			# (the combine soldier sheet: alpha 2) came out black.
+			rgb = img.convert("RGB").resize((nw, nh), Image.Resampling.BILINEAR)
+			alp = img.getchannel("A").resize((nw, nh), Image.Resampling.BILINEAR)
+			img = Image.merge("RGBA", (*rgb.split(), alp))
 			rgba = img.tobytes()
 			target_w, target_h = nw, nh
 		except Exception:
