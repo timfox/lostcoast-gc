@@ -206,3 +206,6 @@
 | 2026-11-13 21:29 | sand-spec | 42.9 | notes/dolphin-probe-20261113-212857/compare-vs-retail.jpg |  | Wet sand: hardware specular gated by the sand texture |
 | 2026-11-13 21:31 | sand-glare | 64.4 | notes/dolphin-probe-20261113-213040/compare-vs-retail.jpg |  | Wet sand: sun glare projected at the mirror point, gated by the sand texture |
 | 2026-11-13 21:32 | sand-glare | 51.4 | notes/dolphin-probe-20261113-213148/compare-vs-retail.jpg |  | Wet sand: sun glare projected at the mirror point, gated by the sand texture |
+| 2026-11-13 21:35 | water-shore | 56.7 | notes/dolphin-probe-20261113-213511/compare-vs-retail.jpg |  | Water thins over the shallows using a baked seabed depth map |
+| 2026-11-13 21:37 | water-shore | 54.3 | notes/dolphin-probe-20261113-213627/compare-vs-retail.jpg |  | Water thins over the shallows to a wet film using a baked seabed depth map |
+| 2026-11-13 21:39 | water-shore | 53.6 | notes/dolphin-probe-20261113-213823/compare-vs-retail.jpg |  | Shallows: the murky body thins with depth, the sky reflection stays |

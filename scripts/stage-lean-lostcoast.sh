@@ -105,6 +105,11 @@ if [[ -f "$BAKE/media/rp_${MAP}.gcr" ]]; then
 	cp -a "$BAKE/media/rp_${MAP}.gcr" "$STAGE/media/"
 	echo "  + ropes rp_${MAP}.gcr"
 fi
+# Seabed depth map for the water shoreline fade (written by bake_worlddl.py).
+if [[ -f "$BAKE/media/dp_${MAP}.gcx" ]]; then
+	cp -a "$BAKE/media/dp_${MAP}.gcx" "$STAGE/media/"
+	echo "  + water depth map dp_${MAP}.gcx"
+fi
 if [[ -f "$BAKE/media/fx_${MAP}.gcf" ]]; then
 	cp -a "$BAKE/media/fx_${MAP}.gcf" "$STAGE/media/"
 	echo "  + smoke emitters fx_${MAP}.gcf"

@@ -491,6 +491,7 @@ def bake(map_bsp: Path, out_dir: Path, max_disp_power: int) -> None:
 	world_first, world_num = bsp.models[0][10], bsp.models[0][11]
 	n_faces = n_disp = n_orphans = n_flat_blend = 0
 	face_ctx: dict[int, tuple] = {}  # brush face → (cluster, lightmap cell, normal)
+	ground_tris: list = []  # upward-facing world triangles, for the water depth map
 
 	for fi in range(world_first, world_first + world_num):
 		f = bsp.faces[fi]
@@ -562,6 +563,11 @@ def bake(map_bsp: Path, out_dir: Path, max_disp_power: int) -> None:
 							lu, lv = cell_st(cell, sl, tl, lw, lh)
 						strip.append((p, col, nrm, s, t, lu, lv))
 				ch.emit(mat, GX_DRAW_TRISTRIP, strip)
+			for j in range(n - 1):
+				for i in range(n - 1):
+					a, b2, c, d = grid[j][i][0], grid[j][i + 1][0], grid[j + 1][i + 1][0], grid[j + 1][i][0]
+					ground_tris.append((a, b2, c))
+					ground_tris.append((a, c, d))
 			n_disp += 1
 			continue
 
@@ -600,6 +606,9 @@ def bake(map_bsp: Path, out_dir: Path, max_disp_power: int) -> None:
 				lu, lv = cell_st(cell, sl, tl, lw, lh)
 			verts.append((p, col, nrm, s, t, lu, lv))
 		ch.emit(mat, GX_DRAW_TRIFAN, verts)
+		if nrm[2] > 0.5 and not water:
+			for k in range(1, len(pts) - 1):
+				ground_tris.append((pts[0], pts[k], pts[k + 1]))
 		face_ctx[fi] = (cluster, cell, nrm)
 		n_faces += 1
 
@@ -644,6 +653,60 @@ def bake(map_bsp: Path, out_dir: Path, max_disp_power: int) -> None:
 		chunks[cluster].emit(omat, GX_DRAW_TRIFAN, verts)
 		n_overlays += 1
 	print(f"  overlays baked: {n_overlays}/{ol // 352}")
+
+	# --- Water depth map ----------------------------------------------------------
+	# Top-down map of how far the ground lies under the harbor water plane
+	# (z = -64), over the playable cove. The water pass multiplies its alpha by
+	# it, so the sheet thins to nothing along the shore instead of ending at a
+	# polygon edge. I4, 128 x 256 texels of 24 units, 16 KB.
+	#   media/dp_<map>.gcx : "GCdp", u16 w, u16 h, f32 x0, f32 y0, f32 cell,
+	#                        pad to 32, then GX I4 tiles (8x8)
+	DP_W, DP_H, DP_CELL, DP_X0, DP_Y0 = 128, 256, 24.0, 0.0, -1536.0
+	WATER_Z, DP_FULL = -64.0, 40.0
+	ground = [[None] * DP_W for _ in range(DP_H)]
+	for a, b2, c in ground_tris:
+		minx = min(a[0], b2[0], c[0]); maxx = max(a[0], b2[0], c[0])
+		miny = min(a[1], b2[1], c[1]); maxy = max(a[1], b2[1], c[1])
+		if maxx < DP_X0 or minx > DP_X0 + DP_W * DP_CELL or maxy < DP_Y0 or miny > DP_Y0 + DP_H * DP_CELL:
+			continue
+		det = (b2[1] - c[1]) * (a[0] - c[0]) + (c[0] - b2[0]) * (a[1] - c[1])
+		if abs(det) < 1e-6:
+			continue
+		for gy in range(max(0, int((miny - DP_Y0) / DP_CELL)), min(DP_H, int((maxy - DP_Y0) / DP_CELL) + 1)):
+			py = DP_Y0 + (gy + 0.5) * DP_CELL
+			for gx in range(max(0, int((minx - DP_X0) / DP_CELL)), min(DP_W, int((maxx - DP_X0) / DP_CELL) + 1)):
+				px = DP_X0 + (gx + 0.5) * DP_CELL
+				w0 = ((b2[1] - c[1]) * (px - c[0]) + (c[0] - b2[0]) * (py - c[1])) / det
+				w1 = ((c[1] - a[1]) * (px - c[0]) + (a[0] - c[0]) * (py - c[1])) / det
+				w2 = 1.0 - w0 - w1
+				if w0 < -0.02 or w1 < -0.02 or w2 < -0.02:
+					continue
+				z = w0 * a[2] + w1 * b2[2] + w2 * c[2]
+				cur = ground[gy][gx]
+				# The seabed is the highest surface at or below the waterline;
+				# anything above it (a pier deck, a cliff) is not the bed.
+				if z <= WATER_Z + 8.0 and (cur is None or z > cur):
+					ground[gy][gx] = z
+				elif cur is None and z > WATER_Z + 8.0:
+					ground[gy][gx] = WATER_Z + 8.0
+	dp = bytearray(DP_W * DP_H // 2)
+	def depth_at(gx, gy):
+		z = ground[gy][gx]
+		if z is None:
+			return 15  # nothing mapped: open water
+		return int(max(0, min(15, round((WATER_Z - z) / DP_FULL * 15.0))))
+	for ty in range(0, DP_H, 8):
+		for tx in range(0, DP_W, 8):
+			tile = (ty // 8) * (DP_W // 8) + (tx // 8)
+			for y in range(8):
+				for x in range(0, 8, 2):
+					hi = depth_at(tx + x, ty + y)
+					lo = depth_at(tx + x + 1, ty + y)
+					dp[tile * 32 + y * 4 + x // 2] = (hi << 4) | lo
+	dp_path = out_dir / "media" / f"dp_{stem}.gcx"
+	dp_path.write_bytes(struct.pack(">4sHHfff", b"GCdp", DP_W, DP_H, DP_X0, DP_Y0, DP_CELL) + b"\0" * 12 + bytes(dp))
+	shallow = sum(1 for row in ground for z in row if z is not None and WATER_Z - DP_FULL < z <= WATER_Z)
+	print(f"  water depth map {dp_path.name}: {DP_W}x{DP_H}, shallow cells {shallow}")
 
 	# --- BSP tree for the runtime point-in-leaf --------------------------------
 	plane_remap: dict[int, int] = {}
