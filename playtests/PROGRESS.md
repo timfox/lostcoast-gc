@@ -209,3 +209,6 @@
 | 2026-11-13 21:35 | water-shore | 56.7 | notes/dolphin-probe-20261113-213511/compare-vs-retail.jpg |  | Water thins over the shallows using a baked seabed depth map |
 | 2026-11-13 21:37 | water-shore | 54.3 | notes/dolphin-probe-20261113-213627/compare-vs-retail.jpg |  | Water thins over the shallows to a wet film using a baked seabed depth map |
 | 2026-11-13 21:39 | water-shore | 53.6 | notes/dolphin-probe-20261113-213823/compare-vs-retail.jpg |  | Shallows: the murky body thins with depth, the sky reflection stays |
+| 2026-11-13 21:43 | water-glare | 53.7 | notes/dolphin-probe-20261113-214220/compare-vs-retail.jpg |  | Sun glare projected on the water plane |
+| 2026-11-13 21:47 | sand-water-glare | vst | notes/dolphin-probe-20261113-214318/vst-sheet.jpg | notes/dolphin-probe-20261113-214318/vst.mp4 | Wet sand glare, shoreline depth fade, sun glare on water, light shafts as additive (frames=6787 unique=6761 luma_mean=82.1 luma_min=0.0 luma_max=144.0) |
+| 2026-11-13 21:48 | water-ripple-glare | 46.1 | notes/dolphin-probe-20261113-214747/compare-vs-retail.jpg |  | Water glare broken into ripple streaks; sand glare toned down; sky at full brightness |

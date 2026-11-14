@@ -96,7 +96,7 @@ for i, side in enumerate(sides):
 		raise SystemExit(f"missing/undecodable sky side {side}")
 	img = img.resize((SIZE, SIZE), Image.Resampling.LANCZOS)
 	if used and "_hdr" not in used:
-		img = Image.fromarray((np.asarray(img).astype(np.float32) * 0.86).clip(0, 255).astype(np.uint8))
+		img = Image.fromarray((np.asarray(img).astype(np.float32) * 1.0).clip(0, 255).astype(np.uint8))
 	preview.paste(img, (i * SIZE, 0))
 	cmpr = gx_cmpr_encode(np.asarray(img))
 	assert len(cmpr) == SIZE * SIZE // 2, len(cmpr)
