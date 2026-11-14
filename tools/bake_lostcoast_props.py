@@ -29,6 +29,53 @@ GC_PR_MAGIC = b"GCpr"
 GC_PR_VERSION = 6
 GC_PR_MAX_TRIS = 65535
 GC_PR_MODEL_TRIS = 105000  # unique model triangles (30 B each in ARAM)
+GC_PR_CMD_VERTS = 1200   # vertices in one draw command (even)
+GC_PR_PIECE_BYTES = 15360  # piece body cap; header + body fit the 16 KB bounce
+
+
+def _stripify(tris):
+	"""Greedy triangle strips over triangles given as 3 hashable vertices.
+	Winding is kept: triangle k of a strip is (s[k], s[k+1], s[k+2]) for
+	even k and (s[k+1], s[k], s[k+2]) for odd k. Returns vertex lists."""
+	edges: dict = {}
+	for ti, (a, b, c) in enumerate(tris):
+		for p, q, x in ((a, b, c), (b, c, a), (c, a, b)):
+			edges.setdefault((p, q), []).append((ti, x))
+	used = [False] * len(tris)
+
+	def grow(ti, rot, commit):
+		a, b, c = tris[ti]
+		s = [(a, b, c), (b, c, a), (c, a, b)][rot]
+		s = list(s)
+		taken = [ti]
+		used[ti] = True
+		while True:
+			k = len(s) - 2
+			key = (s[-1], s[-2]) if k & 1 else (s[-2], s[-1])
+			nxt = None
+			for tj, x in edges.get(key, ()):
+				if not used[tj]:
+					nxt = (tj, x)
+					break
+			if nxt is None:
+				break
+			used[nxt[0]] = True
+			taken.append(nxt[0])
+			s.append(nxt[1])
+		if not commit:
+			for t in taken:
+				used[t] = False
+		return s
+
+	out = []
+	for ti in range(len(tris)):
+		if used[ti]:
+			continue
+		best = max(range(3), key=lambda r: len(grow(ti, r, False)))
+		out.append(grow(ti, best, True))
+	return out
+
+
 GC_PR_PIECE_TRIS = 510  # one piece = 32 B header + verts, fits the 16 KB bounce
 GC_PR_MAX_INST = 512
 GC_PR_MAX_MAT = 127
@@ -917,27 +964,53 @@ def bake_props(
 					int(max(-32767, min(32767, round((u - su) * 256.0)))),
 					int(max(-32767, min(32767, round((v - sv) * 256.0)))),
 				)
-			by_mat.setdefault(mid, []).append(bytes(verts))
+			by_mat.setdefault(mid, []).append(
+				(bytes(verts[0:10]), bytes(verts[10:20]), bytes(verts[20:30])))
 		pieces = []
 		for mid in sorted(by_mat):
-			tl = by_mat[mid]
-			for k in range(0, len(tl), GC_PR_PIECE_TRIS):
-				part = tl[k:k + GC_PR_PIECE_TRIS]
-				# A real GX display list: draw command, vertex count, vertices,
-				# NOP padding. Resident pieces are called in place; streamed
-				# ones are copied into the FIFO from byte 3.
-				body = struct.pack(">BH", 0x90, len(part) * 3) + b"".join(part)
+			# Triangle strips: about half the bytes of loose triangles, so
+			# twice as many models fit the engine's resident cache and
+			# half as much crosses ARAM for the rest.
+			cmds = []  # (bytes, nverts, ntris)
+			loose = []
+			for strip in _stripify(by_mat[mid]):
+				if len(strip) == 3:
+					loose.append(strip)
+					continue
+				k = 0
+				while k + 2 < len(strip):
+					part = strip[k:k + GC_PR_CMD_VERTS]
+					cmds.append((struct.pack(">BH", 0x98, len(part)) + b"".join(part),
+						len(part), len(part) - 2))
+					k += GC_PR_CMD_VERTS - 2  # even step keeps the winding
+			for k in range(0, len(loose), GC_PR_CMD_VERTS // 3):
+				part = loose[k:k + GC_PR_CMD_VERTS // 3]
+				cmds.append((struct.pack(">BH", 0x90, len(part) * 3) + b"".join(b"".join(t) for t in part),
+					len(part) * 3, len(part)))
+			# A real GX display list per piece: draw commands back to back,
+			# NOP padding. Resident pieces are called in place; streamed
+			# ones are copied into the FIFO.
+			body, nv, nt = bytearray(), 0, 0
+			for cb, cv, ct in cmds:
+				if body and len(body) + len(cb) > GC_PR_PIECE_BYTES:
+					body += b"\0" * (-len(body) % 32)
+					pieces.append((mid, nv, bytes(body), nt))
+					body, nv, nt = bytearray(), 0, 0
+				body += cb
+				nv += cv
+				nt += ct
+			if body:
 				body += b"\0" * (-len(body) % 32)
-				pieces.append((mid, len(part) * 3, body))
+				pieces.append((mid, nv, bytes(body), nt))
 		if not pieces:
 			return None
 		dl_ofs = len(blob)
 		total = 0
-		for n, (mid, nverts, body) in enumerate(pieces):
+		for n, (mid, nverts, body, ntris) in enumerate(pieces):
 			nxt = (32 + len(pieces[n + 1][2])) if n + 1 < len(pieces) else 0
-			blob.extend(struct.pack(">BBHII", mid, piece_flags, nverts, len(body), nxt) + b"\0" * 20)
+			blob.extend(struct.pack(">BBHIIH", mid, piece_flags, nverts, len(body), nxt, ntris) + b"\0" * 18)
 			blob.extend(body)
-			total += nverts // 3
+			total += ntris
 		return dl_ofs, 32 + len(pieces[0][2]), total
 
 	def add_model(key, mesh, ids, rotate_walk=False):
