@@ -89,7 +89,7 @@ for dir in "${DUMP_DIRS[@]}"; do
 		| sort -nr | head -40 | while read -r _ p; do
 			cp -f "$p" "$LCGC_SHOTS/" 2>/dev/null || true
 			cp -f "$p" "$LOGDIR/" 2>/dev/null || true
-		done
+		done || true	# head closes the pipe early; pipefail then killed the probe
 done
 
 PASS=0
