@@ -84,6 +84,11 @@ def classify(vmt: dict[str, str] | None) -> dict | None:
 	if _num(vmt.get("$alphatest"), 0.0) >= 1.0:
 		out["flags"] |= F_ALPHATEST
 		out["alpharef"] = int(max(1, min(255, round(_num(vmt.get("$alphatestreference"), 0.5) * 255))))
+	# Overlay decals (graffiti, rubble, trash) blend by alpha in Source. The
+	# world DL has one opaque pass, so they cut out at 1-bit alpha instead.
+	if _num(vmt.get("$decal"), 0.0) >= 1.0 and not out["flags"] & F_ALPHATEST:
+		out["flags"] |= F_ALPHATEST
+		out["alpharef"] = 96
 	env = (vmt.get("$envmap") or "").strip().lower()
 	if (
 		env

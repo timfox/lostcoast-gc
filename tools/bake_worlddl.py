@@ -490,6 +490,7 @@ def bake(map_bsp: Path, out_dir: Path, max_disp_power: int) -> None:
 	skip_flags = SURF_SKY | SURF_NODRAW | SURF_HINT | SURF_SKIP | SURF_TRIGGER
 	world_first, world_num = bsp.models[0][10], bsp.models[0][11]
 	n_faces = n_disp = n_orphans = n_flat_blend = 0
+	face_ctx: dict[int, tuple] = {}  # brush face → (cluster, lightmap cell, normal)
 
 	for fi in range(world_first, world_first + world_num):
 		f = bsp.faces[fi]
@@ -599,7 +600,50 @@ def bake(map_bsp: Path, out_dir: Path, max_disp_power: int) -> None:
 				lu, lv = cell_st(cell, sl, tl, lw, lh)
 			verts.append((p, col, nrm, s, t, lu, lv))
 		ch.emit(mat, GX_DRAW_TRIFAN, verts)
+		face_ctx[fi] = (cluster, cell, nrm)
 		n_faces += 1
+
+	# --- Overlays (lump 45): graffiti, plaster and trash decals -----------------
+	# doverlay_t, 352 bytes: id, texinfo, face count, 64 face ids, U[2], V[2],
+	# UVPoints[4] (xy = corner in basis space, z of the first three = BasisU),
+	# origin, basis normal. Each becomes one quad a unit off its host face,
+	# lit by that face's lightmap cell. Hosts on displacements are skipped:
+	# a flat quad does not follow the sand.
+	n_overlays = 0
+	oo, ol = struct.unpack_from("<ii", bsp.data, 8 + 45 * 16)
+	for oi in range(ol // 352):
+		r = bsp.data[oo + oi * 352:oo + (oi + 1) * 352]
+		_oid, oti, ofc = struct.unpack_from("<ihH", r, 0)
+		hosts = [h for h in struct.unpack_from("<64i", r, 8)[:ofc & 0x3FFF] if h in face_ctx]
+		if not hosts or not (0 <= oti < len(bsp.texinfos)):
+			continue
+		oti_rec = bsp.texinfos[oti]
+		omat = mat_for(oti_rec[5], oti_rec[4])
+		if omat is None:
+			continue
+		U = struct.unpack_from("<2f", r, 264)
+		V = struct.unpack_from("<2f", r, 272)
+		uvp = struct.unpack_from("<12f", r, 280)
+		org = struct.unpack_from("<3f", r, 328)
+		bn = struct.unpack_from("<3f", r, 340)
+		bu = (uvp[2], uvp[5], uvp[8])
+		bv = (bn[1] * bu[2] - bn[2] * bu[1], bn[2] * bu[0] - bn[0] * bu[2], bn[0] * bu[1] - bn[1] * bu[0])
+		host = hosts[0]
+		cluster, cell, hn = face_ctx[host]
+		hf = bsp.faces[host]
+		corner_uv = ((U[0], V[0]), (U[0], V[1]), (U[1], V[1]), (U[1], V[0]))
+		verts = []
+		for k in range(4):
+			x, y = uvp[k * 3], uvp[k * 3 + 1]
+			pt = tuple(org[a] + bu[a] * x + bv[a] * y + hn[a] * 1.0 for a in range(3))
+			lu, lv = (0.0, 0.0)
+			if cell:
+				sl, tl, lw, lh = luxel_uv(bsp, hf, pt)
+				lu, lv = cell_st(cell, max(0.0, min(lw - 1.0, sl)), max(0.0, min(lh - 1.0, tl)), lw, lh)
+			verts.append((pt, light_at(bsp, hf, pt) + (255,), hn, corner_uv[k][0], corner_uv[k][1], lu, lv))
+		chunks[cluster].emit(omat, GX_DRAW_TRIFAN, verts)
+		n_overlays += 1
+	print(f"  overlays baked: {n_overlays}/{ol // 352}")
 
 	# --- BSP tree for the runtime point-in-leaf --------------------------------
 	plane_remap: dict[int, int] = {}

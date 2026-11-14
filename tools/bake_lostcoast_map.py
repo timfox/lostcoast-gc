@@ -1425,6 +1425,20 @@ def bake(
 			continue
 		needed_mats.add(_mat)
 	tevmat_feats: dict[str, dict] = {}
+	# Overlay materials (lump 45, doverlay_t 352 bytes: texinfo at +4).
+	_ov = bsp.get("raw_overlays") if isinstance(bsp, dict) else None
+	if _ov is None:
+		try:
+			_raw = Path(map_bsp).read_bytes()
+			_oo, _ol = struct.unpack_from("<ii", _raw, 8 + 45 * 16)
+			for _i in range(_ol // 352):
+				_ti = struct.unpack_from("<h", _raw, _oo + _i * 352 + 4)[0]
+				if 0 <= _ti < len(bsp["texinfos"]):
+					_td = bsp["texinfos"][_ti]["texdata"]
+					if 0 <= _td < len(bsp["tex_names"]):
+						needed_mats.add(bsp["tex_names"][_td])
+		except Exception as exc:  # noqa: BLE001
+			print(f"  overlay materials skipped: {exc}")
 	for mat in sorted(needed_mats):
 		# VBSP cubemap patches (maps/<map>/..._x_y_z) only swap $envmap. They
 		# share the base material's texture: one pack entry, not one each
