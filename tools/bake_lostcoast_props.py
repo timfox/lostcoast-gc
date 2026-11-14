@@ -26,7 +26,7 @@ from vpk import open_vpk_roots, read_first  # noqa: E402
 from vtf import decode_vtf  # noqa: E402
 
 GC_PR_MAGIC = b"GCpr"
-GC_PR_VERSION = 3
+GC_PR_VERSION = 4
 GC_PR_MAX_TRIS = 65535
 GC_PR_MODEL_TRIS = 105000  # unique model triangles (30 B each in ARAM)
 GC_PR_PIECE_TRIS = 512  # one piece = 32 B header + verts, fits the 16 KB bounce
@@ -876,22 +876,14 @@ def bake_props(
 	model_index: dict[str, int] = {}
 	piece_blob = bytearray()
 
-	def add_model(key, mesh, ids, rotate_walk=False):
-		if key in model_index:
-			return model_index[key]
-		pts = [((p[1], -p[0], p[2]) if rotate_walk else p) for p in mesh.positions]
-		ext = max((abs(c) for p in pts for c in p), default=1.0)
-		frac = 0
-		while frac < 6 and ext * (1 << (frac + 1)) <= 32000.0:
-			frac += 1
-		q = float(1 << frac)
+	def emit_pieces(pts, uvs, tris, tri_mat, ids, q):
 		by_mat: dict[int, list] = {}
-		for ti, (a, b, c) in enumerate(mesh.tris):
-			local = mesh.tri_mat[ti] if ti < len(mesh.tri_mat) else 0
+		for ti, (a, b, c) in enumerate(tris):
+			local = tri_mat[ti] if ti < len(tri_mat) else 0
 			mid = mat_byte(ids, local)
 			if mid is None:
 				continue
-			uvs3 = [mesh.uvs[i] for i in (a, b, c)]
+			uvs3 = [uvs[i] for i in (a, b, c)]
 			# One whole-texture shift per triangle keeps the s16 UVs in
 			# range without tearing a face that crosses the wrap.
 			su = math.floor(min(u for u, _v in uvs3))
@@ -925,8 +917,34 @@ def bake_props(
 			piece_blob.extend(struct.pack(">BBHII", mid, 0, nverts, len(body), nxt) + b"\0" * 20)
 			piece_blob.extend(body)
 			total += nverts // 3
+		return dl_ofs, 32 + len(pieces[0][2]), total
+
+	def add_model(key, mesh, ids, rotate_walk=False):
+		if key in model_index:
+			return model_index[key]
+		pts = [((p[1], -p[0], p[2]) if rotate_walk else p) for p in mesh.positions]
+		ext = max((abs(c) for p in pts for c in p), default=1.0)
+		frac = 0
+		while frac < 6 and ext * (1 << (frac + 1)) <= 32000.0:
+			frac += 1
+		q = float(1 << frac)
+		full = emit_pieces(pts, mesh.uvs, mesh.tris, mesh.tri_mat, ids, q)
+		if full is None:
+			return None
+		# Far LOD: about a sixth of the triangles, welded on a coarser grid.
+		# The engine picks it when the instance is small on screen.
+		far = full
+		target = max(12, len(mesh.tris) // 6)
+		if len(mesh.tris) > 24:
+			for div in (48, 40, 32, 28, 24, 20, 16, 14, 12, 10, 8, 6, 5, 4, 3):
+				lp, lu, lt, lm = _cluster_tris(pts, mesh.uvs, mesh.tris, mesh.tri_mat, div)
+				if 0 < len(lt) <= target:
+					got = emit_pieces(lp, lu, lt, lm, ids, q)
+					if got:
+						far = got
+					break
 		model_index[key] = len(model_recs)
-		model_recs.append((dl_ofs, 32 + len(pieces[0][2]), total, frac))
+		model_recs.append((full[0], full[1], full[2], frac, far[0], far[1], far[2]))
 		return model_index[key]
 
 	inst_blob = bytearray()
@@ -976,6 +994,7 @@ def bake_props(
 
 	chain_bytes = sum(len(body) for *_, body in chains)
 	model_tris = sum(r[2] for r in model_recs)
+	print(f"  far LOD tris: {sum(r[6] for r in model_recs if r[4] != r[0])} over {sum(1 for r in model_recs if r[4] != r[0])} models")
 	print(
 		f"  models: {len(model_recs)} unique tris: {model_tris} "
 		f"instances: {n_inst} (placed tris {inst_tris}) mats: {len(chains)} chain={chain_bytes}B"
@@ -984,8 +1003,11 @@ def bake_props(
 	for stale in out_dir.glob("prop_*.cmp"):
 		stale.unlink()
 	model_blob = bytearray()
-	for dl_ofs, first_bytes, tris, frac in model_recs:
-		model_blob += struct.pack(">IIHBB", dl_ofs, first_bytes, min(65535, tris), frac, 0)
+	for dl_ofs, first_bytes, tris, frac, far_ofs, far_bytes, far_tris in model_recs:
+		model_blob += struct.pack(
+			">IIHBBIIHH", dl_ofs, first_bytes, min(65535, tris), frac, 0,
+			far_ofs, far_bytes, min(65535, far_tris), 0,
+		)
 	model_blob += b"\0" * (-len(model_blob) % 32)
 	inst_ofs = 32
 	models_ofs = inst_ofs + len(inst_blob)
