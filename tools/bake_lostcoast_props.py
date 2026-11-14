@@ -26,10 +26,10 @@ from vpk import open_vpk_roots, read_first  # noqa: E402
 from vtf import decode_vtf  # noqa: E402
 
 GC_PR_MAGIC = b"GCpr"
-GC_PR_VERSION = 5
+GC_PR_VERSION = 6
 GC_PR_MAX_TRIS = 65535
 GC_PR_MODEL_TRIS = 105000  # unique model triangles (30 B each in ARAM)
-GC_PR_PIECE_TRIS = 512  # one piece = 32 B header + verts, fits the 16 KB bounce
+GC_PR_PIECE_TRIS = 510  # one piece = 32 B header + verts, fits the 16 KB bounce
 GC_PR_MAX_INST = 512
 GC_PR_MAX_MAT = 127
 PROP_CLASSNAMES = {"prop_physics", "prop_dynamic", "prop_static"}
@@ -923,7 +923,10 @@ def bake_props(
 			tl = by_mat[mid]
 			for k in range(0, len(tl), GC_PR_PIECE_TRIS):
 				part = tl[k:k + GC_PR_PIECE_TRIS]
-				body = b"".join(part)
+				# A real GX display list: draw command, vertex count, vertices,
+				# NOP padding. Resident pieces are called in place; streamed
+				# ones are copied into the FIFO from byte 3.
+				body = struct.pack(">BH", 0x90, len(part) * 3) + b"".join(part)
 				body += b"\0" * (-len(body) % 32)
 				pieces.append((mid, len(part) * 3, body))
 		if not pieces:
