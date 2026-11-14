@@ -469,7 +469,7 @@ def bake(map_bsp: Path, out_dir: Path, max_disp_power: int) -> None:
 	chunks: dict[int, Chunk] = {}
 	skip_flags = SURF_SKY | SURF_NODRAW | SURF_HINT | SURF_SKIP | SURF_TRIGGER
 	world_first, world_num = bsp.models[0][10], bsp.models[0][11]
-	n_faces = n_disp = n_orphans = 0
+	n_faces = n_disp = n_orphans = n_flat_blend = 0
 
 	for fi in range(world_first, world_first + world_num):
 		f = bsp.faces[fi]
@@ -566,7 +566,13 @@ def bake(map_bsp: Path, out_dir: Path, max_disp_power: int) -> None:
 			ch.lm.blit(cell, samples)
 		verts = []
 		for p, (s, t) in zip(pts, sts):
-			col = (96, 132, 140, 255) if water else light_at(bsp, f, p) + (255,)
+			# WorldVertexTransition on a plain brush face has no blend alpha:
+			# Source shows $basetexture only. 255 here drew layer 2 solid
+			# and left hard-edged pale polygons across the beach.
+			blend_a = 0 if mat_recs[mat][1] else 255
+			if blend_a == 0:
+				n_flat_blend += 1
+			col = (96, 132, 140, 255) if water else light_at(bsp, f, p) + (blend_a,)
 			lu, lv = (0.0, 0.0)
 			if cell:
 				sl, tl, lw, lh = luxel_uv(bsp, f, p)
@@ -727,7 +733,7 @@ def bake(map_bsp: Path, out_dir: Path, max_disp_power: int) -> None:
 	batches = sum(len(c.batches) for c in chunks.values())
 	resident = ofs_pvsdir  # mats + tree + chunk directory stay in MEM1
 	print(f"world DL bake {stem}:")
-	print(f"  faces={n_faces} displacements={n_disp} (power<={max_disp_power}) orphans={n_orphans} tris={tris}")
+	print(f"  faces={n_faces} displacements={n_disp} (power<={max_disp_power}) orphans={n_orphans} flat_blend_verts={n_flat_blend} tris={tris}")
 	print(f"  clusters={bsp.numclusters} chunks={len(order)} batches={batches} mats={len(mat_recs)}")
 	print(f"  tree nodes={len(bsp.nodes)} planes={len(plane_remap)} ({(len(node_blob) + len(plane_blob)) // 1024} KB)")
 	print(f"  pvs rows={len(pvs_blob) // 1024} KB chunkdir={len(order) * 24 // 1024} KB")

@@ -422,19 +422,13 @@ def _simplify(
 		]
 		merged_mats = list(head_mats) + list(body_mats)
 		return merged_pos, merged_uv, merged_tris, merged_mats
-	if _hull_model(model) or _npc_model(model):
-		# Boats keep long plates; NPC wings/limbs shred under spread decimate.
-		return _decimate_tris(
-			positions, uvs, tris, mats, max_tris, spread=False, keep_long=True,
-		)
-	if not _shell_model(model) or len(tris) <= max_tris:
-		return _decimate_tris(
-			positions, uvs, tris, mats, max_tris,
-			spread=_spread_model(model) and not _hull_model(model),
-			keep_long=_hull_model(model),
-		)
+	if len(tris) <= max_tris:
+		return positions, uvs, tris, mats
+	# Weld vertices on a grid, finest grid that fits the budget. Picking a
+	# subset of triangles (the old path for boats, NPCs and most props)
+	# met the budget by leaving holes in every mesh.
 	best = (positions, uvs, tris, mats)
-	for div in (24, 20, 18, 16, 14, 12, 10, 8, 6, 5, 4, 3):
+	for div in (160, 128, 96, 80, 64, 56, 48, 40, 32, 28, 24, 20, 18, 16, 14, 12, 10, 8, 6, 5, 4, 3):
 		clustered = _cluster_tris(positions, uvs, tris, mats, div)
 		best = clustered
 		if len(clustered[2]) <= max_tris:

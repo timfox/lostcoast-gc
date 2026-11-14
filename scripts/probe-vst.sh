@@ -12,7 +12,7 @@ ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 LABEL="${1:?label}"
 NOTE="${2:-}"
 export LCGC_VST=1
-export LCGC_ISO="$ROOT/out/lostcoastgc-vst.iso"
+export LCGC_ISO="${LCGC_VST_ISO:-$ROOT/out/lostcoastgc-vst.iso}"
 export XASH3D_GC_ISO_CACHE="${LCGC_VST_ISO_CACHE:-/dev/shm/lostcoastgc-iso-vst}"
 if [[ "${LCGC_VST_SKIP_ISO:-0}" != "1" ]]; then
 	bash "$SCRIPT_DIR/build-lostcoastgc.sh" --iso-only --skip-bake \

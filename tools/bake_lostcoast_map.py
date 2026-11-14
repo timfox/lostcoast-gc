@@ -377,9 +377,15 @@ def rgba_to_cmpr_mips(rgba: bytes, w: int, h: int, alpha: bool, max_side: int = 
 	tw = min(tw, cap)
 	th = min(th, cap)
 	if (tw, th) != (w, h):
-		resample = Image.Resampling.NEAREST if alpha else Image.Resampling.BICUBIC
-		rgb = np.asarray(Image.fromarray(rgb).resize((tw, th), resample))
-		opaque = np.asarray(Image.fromarray(opaque.astype(np.uint8) * 255).resize((tw, th), Image.Resampling.NEAREST)) > 127
+		# Nearest by index: this host's Pillow returns NULL from
+		# resize(NEAREST) (12.1.1), which killed the prop bake.
+		yi = (np.arange(th) * h // th).clip(0, h - 1)
+		xi = (np.arange(tw) * w // tw).clip(0, w - 1)
+		if alpha:
+			rgb = rgb[yi][:, xi]
+		else:
+			rgb = np.asarray(Image.fromarray(rgb).resize((tw, th), Image.Resampling.BICUBIC))
+		opaque = opaque[yi][:, xi]
 	levels = bytearray()
 	count = 0
 	fcol = rgb.astype(np.float32)
