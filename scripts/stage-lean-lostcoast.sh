@@ -101,6 +101,10 @@ fi
 if [[ ! -f "$BAKE/media/fx_${MAP}.gcf" || "$SCRIPT_DIR/../tools/bake_lostcoast_fx.py" -nt "$BAKE/media/fx_${MAP}.gcf" ]]; then
 	python3 "$SCRIPT_DIR/../tools/bake_lostcoast_fx.py" --out "$BAKE" || true
 fi
+if [[ -f "$BAKE/media/rp_${MAP}.gcr" ]]; then
+	cp -a "$BAKE/media/rp_${MAP}.gcr" "$STAGE/media/"
+	echo "  + ropes rp_${MAP}.gcr"
+fi
 if [[ -f "$BAKE/media/fx_${MAP}.gcf" ]]; then
 	cp -a "$BAKE/media/fx_${MAP}.gcf" "$STAGE/media/"
 	echo "  + smoke emitters fx_${MAP}.gcf"

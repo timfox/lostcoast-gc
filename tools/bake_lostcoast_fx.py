@@ -55,6 +55,40 @@ def main() -> None:
 	# Largest first: the engine may stop early.
 	recs.sort(key=lambda r: -r[0])
 	recs = recs[:MAX_STACKS]
+	# Ropes and cables (move_rope / keyframe_rope → NextKey): a 7-point
+	# strip per span, sagged as a parabola whose arc length is span + Slack.
+	#   media/rp_<map>.gcr : "GCrp", u16 version (1), u16 count,
+	#   then 44 bytes each: s16 xyz[7], u8 width, u8 pad
+	import math
+	all_ents = list(entities(args.map.read_bytes()))
+	by_name = {e.get("targetname"): e for e in all_ents if e.get("targetname")}
+	ropes = []
+	for kv in all_ents:
+		if kv.get("classname") not in ("move_rope", "keyframe_rope") or not kv.get("NextKey"):
+			continue
+		nxt = by_name.get(kv["NextKey"])
+		if not nxt:
+			continue
+		a = [float(v) for v in kv.get("origin", "0 0 0").split()]
+		b = [float(v) for v in nxt.get("origin", "0 0 0").split()]
+		span = math.dist(a, b)
+		if span < 1.0:
+			continue
+		slack = max(0.0, float(kv.get("Slack", "25") or 25))
+		sag = math.sqrt(3.0 * span * slack / 8.0)
+		pts = []
+		for i in range(7):
+			t = i / 6.0
+			x = a[0] + (b[0] - a[0]) * t
+			y = a[1] + (b[1] - a[1]) * t
+			z = a[2] + (b[2] - a[2]) * t - sag * 4.0 * t * (1.0 - t)
+			pts += [int(max(-32767, min(32767, round(v)))) for v in (x, y, z)]
+		width = int(max(1, min(8, float(kv.get("Width", "2") or 2))))
+		ropes.append(struct.pack(">21hBB", *pts, width, 0))
+	ropes = ropes[:64]
+	rp = args.out / "media" / f"rp_{args.map.stem.lower()}.gcr"
+	rp.write_bytes(struct.pack(">4sHH", b"GCrp", 1, len(ropes)) + b"".join(ropes))
+	print(f"  wrote {rp} ropes={len(ropes)}")
 	out = args.out / "media" / f"fx_{args.map.stem.lower()}.gcf"
 	out.write_bytes(struct.pack(">4sHH", b"GCfx", 1, len(recs)) + b"".join(r[1] for r in recs))
 	print(f"  wrote {out} stacks={len(recs)}")
