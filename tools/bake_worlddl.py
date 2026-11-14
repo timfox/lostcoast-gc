@@ -154,6 +154,26 @@ class Bsp:
 		return self.leaves[-1 - idx][1]
 
 
+LIGHT_EXPOSURE = 2.8
+
+
+def _light_texel(x: float) -> int:
+	"""Source linear light → lightmap texel for the engine's x2 modulate.
+
+	0.5 in the texel is identity, so texel = gamma(light) / 2. The old
+	Reinhard curve at exposure 4 put shade at 0.57 and sun at 0.95, which
+	the x2 stage turned into 1.1 and 1.9: every lit wall clipped to white
+	and lost its texture. LIGHT_EXPOSURE stands in for retail's
+	auto-exposure, which sits above 1 in this map.
+	"""
+	import math
+
+	if not math.isfinite(x) or x <= 0.0:
+		return 0
+	y = 0.5 * pow(x * LIGHT_EXPOSURE, 1.0 / 2.2)
+	return min(255, int(y * 255.0 + 0.5))
+
+
 def light_at(bsp: Bsp, f, base_pt) -> tuple[int, int, int]:
 	"""Baked light colour at a world point on face f (flat lightmap, style 0)."""
 	lightofs = f[9]
@@ -180,7 +200,7 @@ def light_at(bsp: Bsp, f, base_pt) -> tuple[int, int, int]:
 		acc[0] += r * sc * w
 		acc[1] += g * sc * w
 		acc[2] += b * sc * w
-	return (_tonemap_hdr(acc[0]), _tonemap_hdr(acc[1]), _tonemap_hdr(acc[2]))
+	return (_light_texel(acc[0]), _light_texel(acc[1]), _light_texel(acc[2]))
 
 
 def rgb565(c) -> int:
@@ -211,7 +231,7 @@ def luxel_color(bsp: Bsp, f, x: int, y: int) -> tuple[int, int, int]:
 	r, g, b, e = lit[o], lit[o + 1], lit[o + 2], lit[o + 3]
 	e = e - 256 if e > 127 else e
 	sc = (2.0 ** e) / 255.0
-	return (_tonemap_hdr(r * sc), _tonemap_hdr(g * sc), _tonemap_hdr(b * sc))
+	return (_light_texel(r * sc), _light_texel(g * sc), _light_texel(b * sc))
 
 
 def face_samples(bsp: Bsp, f):
