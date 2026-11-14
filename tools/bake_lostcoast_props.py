@@ -26,8 +26,10 @@ from vpk import open_vpk_roots, read_first  # noqa: E402
 from vtf import decode_vtf  # noqa: E402
 
 GC_PR_MAGIC = b"GCpr"
-GC_PR_VERSION = 2
+GC_PR_VERSION = 3
 GC_PR_MAX_TRIS = 65535
+GC_PR_MODEL_TRIS = 105000  # unique model triangles (30 B each in ARAM)
+GC_PR_PIECE_TRIS = 512  # one piece = 32 B header + verts, fits the 16 KB bounce
 GC_PR_MAX_INST = 512
 GC_PR_MAX_MAT = 96
 PROP_CLASSNAMES = {"prop_physics", "prop_dynamic", "prop_static"}
@@ -97,6 +99,10 @@ def _tri_cap(model: str, natural: int) -> int:
 		cap = 80
 	else:
 		cap = 96
+	# Pack v3 stores a model once and places it with a matrix, so the
+	# budget is unique triangles, not triangles times instances.
+	if "fisherman" not in low:
+		cap *= 4
 	return max(1, min(natural, cap))
 
 
@@ -813,13 +819,14 @@ def bake_props(
 			model_cache[model] = None
 			return None
 		ids = materials_for(model, mdl)
-		cap = _tri_cap(model, len(mesh.tris))
+		natural = len(mesh.tris)
+		cap = _tri_cap(model, natural)
 		pos, uv, tris, mats = _simplify(
 			model, mesh.positions, mesh.uvs, mesh.tris, mesh.tri_mat, cap,
 		)
 		mesh = SourceMesh(positions=pos, uvs=uv, tris=tris, tri_mat=mats)
 		model_cache[model] = (mesh, ids)
-		print(f"  mesh {model}: tris={len(tris)} (cap {cap}) mats={ids}")
+		print(f"  mesh {model}: tris={len(tris)} (cap {cap}, source {natural}) mats={ids}")
 		return model_cache[model]
 
 	# Fisherman + canister first so the mat cap cannot leave CapFaces
@@ -828,36 +835,25 @@ def bake_props(
 	mesh_for(CANISTER_FLIGHT_MODEL)
 	for model, _origin, _angles in props:
 		mesh_for(model)
-	wanted = 0
+	used_models = []
 	for model, _origin, _angles in props:
-		got = model_cache.get(model)
-		if got:
-			wanted += len(got[0].tris)
-	if wanted > GC_PR_MAX_TRIS and wanted > 0:
-		# Largest-first on a hull drops the small skin and leaves the ribs.
-		# Boats and the dock stay whole; everything else absorbs the cut.
-		hull_tris = 0
-		other_tris = 0
-		for model, _origin, _angles in props:
-			got = model_cache.get(model)
-			if not got:
-				continue
-			n = len(got[0].tris)
-			if _hull_model(model) or _npc_model(model):
-				hull_tris += n
-			else:
-				other_tris += n
-		# Reserve local-space canister flight + fisherman walker.
-		room = GC_PR_MAX_TRIS - 128 - hull_tris - 96 - 4000
-		scale = (room / other_tris) if other_tris and room > 0 else 1.0
-		print(
-			f"  shrinking meshes {wanted} → {GC_PR_MAX_TRIS} "
-			f"(hulls+npc {hull_tris} kept, other x{scale:.2f})"
+		if model_cache.get(model) and model not in used_models:
+			used_models.append(model)
+	wanted = sum(len(model_cache[m][0].tris) for m in used_models)
+	if wanted > GC_PR_MODEL_TRIS:
+		# Boats, the dock and the NPC stand-ins stay whole; the rest shrinks.
+		keep_tris = sum(
+			len(model_cache[m][0].tris) for m in used_models
+			if _hull_model(m) or _npc_model(m)
 		)
-		for model, got in list(model_cache.items()):
-			if not got or _hull_model(model) or _npc_model(model):
+		other_tris = wanted - keep_tris
+		room = GC_PR_MODEL_TRIS - keep_tris - 4000 - 160
+		scale = (room / other_tris) if other_tris and room > 0 else 1.0
+		print(f"  shrinking models {wanted} → {GC_PR_MODEL_TRIS} (kept {keep_tris}, other x{scale:.2f})")
+		for model in used_models:
+			if _hull_model(model) or _npc_model(model):
 				continue
-			mesh, ids = got
+			mesh, ids = model_cache[model]
 			keep = max(4, int(len(mesh.tris) * scale))
 			if keep >= len(mesh.tris):
 				continue
@@ -869,155 +865,140 @@ def bake_props(
 				ids,
 			)
 
-	world_tris: list[tuple[int, tuple, tuple, tuple]] = []
-	inst_recs: list[tuple[int, int, tuple, tuple]] = []
+	# ---- pack v3: models once, instances carry origin + angles ----
+	def mat_byte(ids, local):
+		raw = ids[local] if 0 <= local < len(ids) else ids[0]
+		if raw < 0:
+			return None
+		return (raw & 0x7F) | (0x80 if raw & 0x100 else 0)
+
+	model_recs = []   # (dl_ofs, first_bytes, tris, frac)
+	model_index: dict[str, int] = {}
+	piece_blob = bytearray()
+
+	def add_model(key, mesh, ids, rotate_walk=False):
+		if key in model_index:
+			return model_index[key]
+		pts = [((p[1], -p[0], p[2]) if rotate_walk else p) for p in mesh.positions]
+		ext = max((abs(c) for p in pts for c in p), default=1.0)
+		frac = 0
+		while frac < 6 and ext * (1 << (frac + 1)) <= 32000.0:
+			frac += 1
+		q = float(1 << frac)
+		by_mat: dict[int, list] = {}
+		for ti, (a, b, c) in enumerate(mesh.tris):
+			local = mesh.tri_mat[ti] if ti < len(mesh.tri_mat) else 0
+			mid = mat_byte(ids, local)
+			if mid is None:
+				continue
+			uvs3 = [mesh.uvs[i] for i in (a, b, c)]
+			# One whole-texture shift per triangle keeps the s16 UVs in
+			# range without tearing a face that crosses the wrap.
+			su = math.floor(min(u for u, _v in uvs3))
+			sv = math.floor(min(v for _u, v in uvs3))
+			verts = bytearray()
+			for i, (u, v) in zip((a, b, c), uvs3):
+				x, y, z = pts[i]
+				verts += struct.pack(
+					">hhhhh",
+					int(max(-32767, min(32767, round(x * q)))),
+					int(max(-32767, min(32767, round(y * q)))),
+					int(max(-32767, min(32767, round(z * q)))),
+					int(max(-32767, min(32767, round((u - su) * 256.0)))),
+					int(max(-32767, min(32767, round((v - sv) * 256.0)))),
+				)
+			by_mat.setdefault(mid, []).append(bytes(verts))
+		pieces = []
+		for mid in sorted(by_mat):
+			tl = by_mat[mid]
+			for k in range(0, len(tl), GC_PR_PIECE_TRIS):
+				part = tl[k:k + GC_PR_PIECE_TRIS]
+				body = b"".join(part)
+				body += b"\0" * (-len(body) % 32)
+				pieces.append((mid, len(part) * 3, body))
+		if not pieces:
+			return None
+		dl_ofs = len(piece_blob)
+		total = 0
+		for n, (mid, nverts, body) in enumerate(pieces):
+			nxt = (32 + len(pieces[n + 1][2])) if n + 1 < len(pieces) else 0
+			piece_blob.extend(struct.pack(">BBHII", mid, 0, nverts, len(body), nxt) + b"\0" * 20)
+			piece_blob.extend(body)
+			total += nverts // 3
+		model_index[key] = len(model_recs)
+		model_recs.append((dl_ofs, 32 + len(pieces[0][2]), total, frac))
+		return model_index[key]
+
+	inst_blob = bytearray()
+	n_inst = 0
+	inst_tris = 0
 	for model, origin, angles in props:
 		got = mesh_for(model)
 		if got is None:
 			continue
 		mesh, ids = got
+		mi = add_model(model, mesh, ids)
+		if mi is None:
+			continue
 		pitch, yaw, roll = angles
 		xform = angle_matrix(pitch, yaw, roll)
-		first = len(world_tris)
-		mins = [32767, 32767, 32767]
-		maxs = [-32767, -32767, -32767]
-		for ti, (a, b, c) in enumerate(mesh.tris):
-			if len(world_tris) >= GC_PR_MAX_TRIS:
-				break
-			local = mesh.tri_mat[ti] if ti < len(mesh.tri_mat) else 0
-			raw = ids[local] if 0 <= local < len(ids) else ids[0]
-			if raw < 0:
-				continue
-			mid = (raw & 0x7F) | (0x80 if raw & 0x100 else 0)
-			vs = []
-			for idx in (a, b, c):
-				wp = transform_point(xform, origin, mesh.positions[idx])
-				uu, vv = _wrap_uv(*mesh.uvs[idx])
-				vs.append((wp[0], wp[1], wp[2], uu, vv))
-				for axis in range(3):
-					mins[axis] = min(mins[axis], wp[axis])
-					maxs[axis] = max(maxs[axis], wp[axis])
-			world_tris.append((mid, vs[0], vs[1], vs[2]))
-		count = len(world_tris) - first
-		if count > 0:
-			inst_recs.append((first, count, tuple(mins), tuple(maxs)))
-			if "chair" in model.lower():
-				print(f"  chair instance {origin} tris={count} mat={ids}")
-		if len(world_tris) >= GC_PR_MAX_TRIS:
-			print("  hit tri ceiling")
-			break
+		mins = [32767.0] * 3
+		maxs = [-32767.0] * 3
+		for p in mesh.positions:
+			wp = transform_point(xform, origin, p)
+			for axis in range(3):
+				mins[axis] = min(mins[axis], wp[axis])
+				maxs[axis] = max(maxs[axis], wp[axis])
+		c16 = lambda v: int(max(-32767, min(32767, round(v))))
+		a16 = lambda d: ((int(round(d * 65536.0 / 360.0)) + 32768) & 0xFFFF) - 32768
+		inst_blob += struct.pack(
+			">HH3h3h3h3hI",
+			mi, min(65535, model_recs[mi][2]),
+			*[c16(math.floor(v)) for v in mins], *[c16(math.ceil(v)) for v in maxs],
+			*[c16(v) for v in origin],
+			a16(pitch), a16(yaw), a16(roll),
+			0,
+		)
+		n_inst += 1
+		inst_tris += model_recs[mi][2]
 
-	# Local-space canister for CapFaces flight (not an instance — hdr[5] only).
-	flight_first = 0
-	flight_count = 0
+	flight_model = 0xFFFF
 	flight = mesh_for(CANISTER_FLIGHT_MODEL)
-	if flight and len(world_tris) + 4 < GC_PR_MAX_TRIS:
-		mesh, ids = flight
-		flight_first = len(world_tris)
-		for ti, (a, b, c) in enumerate(mesh.tris):
-			if len(world_tris) >= GC_PR_MAX_TRIS:
-				break
-			local = mesh.tri_mat[ti] if ti < len(mesh.tri_mat) else 0
-			raw = ids[local] if 0 <= local < len(ids) else ids[0]
-			if raw < 0:
-				continue
-			mid = (raw & 0x7F) | (0x80 if raw & 0x100 else 0)
-			vs = []
-			for idx in (a, b, c):
-				p = mesh.positions[idx]
-				uu, vv = _wrap_uv(*mesh.uvs[idx])
-				vs.append((p[0], p[1], p[2], uu, vv))
-			world_tris.append((mid, vs[0], vs[1], vs[2]))
-		flight_count = len(world_tris) - flight_first
-		print(f"  canister flight mesh: first={flight_first} count={flight_count}")
-	else:
-		print("  canister flight mesh: skipped")
-
-	# Local-space Source fisherman for CapFaces lead walk (hdr[6]).
-	# Rotate +Y-facing bind pose to +X so runtime yaw matches Source.
-	walk_first = 0
-	walk_count = 0
+	if flight:
+		got_i = add_model(CANISTER_FLIGHT_MODEL, flight[0], flight[1])
+		flight_model = 0xFFFF if got_i is None else got_i
+	# Fisherman lead walk: bind pose faces +Y, runtime yaw wants +X.
+	walk_model = 0xFFFF
 	walk = mesh_for(FISHERMAN_WALK_MODEL)
-	if walk and len(world_tris) + 4 < GC_PR_MAX_TRIS:
-		mesh, ids = walk
-		walk_first = len(world_tris)
-		for ti, (a, b, c) in enumerate(mesh.tris):
-			if len(world_tris) >= GC_PR_MAX_TRIS:
-				break
-			local = mesh.tri_mat[ti] if ti < len(mesh.tri_mat) else 0
-			raw = ids[local] if 0 <= local < len(ids) else ids[0]
-			if raw < 0:
-				continue
-			mid = (raw & 0x7F) | (0x80 if raw & 0x100 else 0)
-			vs = []
-			for idx in (a, b, c):
-				px, py, pz = mesh.positions[idx]
-				# +Y face → +X face: (x,y) → (y, -x)
-				rx, ry = py, -px
-				uu, vv = _wrap_uv(*mesh.uvs[idx])
-				vs.append((rx, ry, pz, uu, vv))
-			world_tris.append((mid, vs[0], vs[1], vs[2]))
-		walk_count = len(world_tris) - walk_first
-		print(f"  fisherman walk mesh: first={walk_first} count={walk_count}")
-	else:
-		print("  fisherman walk mesh: skipped")
+	if walk:
+		got_i = add_model("walk:" + FISHERMAN_WALK_MODEL, walk[0], walk[1], rotate_walk=True)
+		walk_model = 0xFFFF if got_i is None else got_i
 
 	chain_bytes = sum(len(body) for *_, body in chains)
+	model_tris = sum(r[2] for r in model_recs)
 	print(
-		f"  world tris: {len(world_tris)} instances: {len(inst_recs)} "
-		f"mats: {len(chains)} chain={chain_bytes}B"
+		f"  models: {len(model_recs)} unique tris: {model_tris} "
+		f"instances: {n_inst} (placed tris {inst_tris}) mats: {len(chains)} chain={chain_bytes}B"
 	)
-
 	out_dir.mkdir(parents=True, exist_ok=True)
 	for stale in out_dir.glob("prop_*.cmp"):
 		stale.unlink()
-
-	def pack_vert(v):
-		x, y, z, u, vv = v
-		return struct.pack(
-			">hhhHH",
-			int(max(-32767, min(32767, round(x)))),
-			int(max(-32767, min(32767, round(y)))),
-			int(max(-32767, min(32767, round(z)))),
-			int(max(0, min(65535, round(u * 256.0)))) & 0xFFFF,
-			int(max(0, min(65535, round(vv * 256.0)))) & 0xFFFF,
-		)
-
-	inst_blob = bytearray()
-	for first, count, mins, maxs in inst_recs:
-		inst_blob += struct.pack(
-			">HH3h3h",
-			first, count,
-			*[int(max(-32767, min(32767, round(v)))) for v in mins],
-			*[int(max(-32767, min(32767, round(v)))) for v in maxs],
-		)
-	tri_blob = bytearray()
-	for mid, v0, v1, v2 in world_tris:
-		tri_blob.append(mid & 0xFF)
-		tri_blob.append(0)
-		tri_blob += pack_vert(v0)
-		tri_blob += pack_vert(v1)
-		tri_blob += pack_vert(v2)
-
+	model_blob = bytearray()
+	for dl_ofs, first_bytes, tris, frac in model_recs:
+		model_blob += struct.pack(">IIHBB", dl_ofs, first_bytes, min(65535, tris), frac, 0)
+	model_blob += b"\0" * (-len(model_blob) % 32)
 	inst_ofs = 32
-	tris_ofs = inst_ofs + len(inst_blob)
-	# hdr[5] BE: (flight_first << 16) | flight_count
-	# hdr[6] BE: (walk_first << 16) | walk_count  (fisherman lead path)
+	models_ofs = inst_ofs + len(inst_blob)
+	dl_base = models_ofs + len(model_blob)
 	hdr = struct.pack(
 		">4sHHHHIIII",
-		GC_PR_MAGIC,
-		GC_PR_VERSION,
-		0,  # materials live in the pt_ pack, not an atlas page
-		len(inst_recs),
-		len(world_tris),
-		inst_ofs,
-		tris_ofs,
-		((flight_first & 0xFFFF) << 16) | (flight_count & 0xFFFF),
-		((walk_first & 0xFFFF) << 16) | (walk_count & 0xFFFF),
+		GC_PR_MAGIC, GC_PR_VERSION, n_inst, len(model_recs), 0,
+		inst_ofs, models_ofs, dl_base,
+		((flight_model & 0xFFFF) << 16) | (walk_model & 0xFFFF),
 	)
 	hdr = hdr + b"\0" * (32 - len(hdr))
 	path = out_dir / f"gp_{stem}.gcp"
-	path.write_bytes(hdr + inst_blob + tri_blob)
+	path.write_bytes(hdr + inst_blob + model_blob + piece_blob)
 	tex_path = out_dir / f"pt_{stem}.gct"
 	write_gcwt(tex_path, chains)
 	print(f"  wrote {path} ({path.stat().st_size} bytes)")
