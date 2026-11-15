@@ -1,0 +1,85 @@
+# CapFaces smoke 20261114-232757
+iso=/home/tim/Desktop/lostcoast-gc/out/claude-sand.iso
+rc=124 pass=0
+logdir=/home/tim/Desktop/lostcoast-gc/playtests/notes/dolphin-probe-20261114-232757
+dolphin=/home/tim/xash3d-gc-lostcoast/3rdparty/dolphin/build/Binaries/xash-gc-dolphin
+28:26:811 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:12] Xash3D GameCube: client edicts using static gcmap bootstrap tables
+28:27:010 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:12] Xash3D GameCube: client edicts using static gcmap bootstrap tables
+28:27:010 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:12] Xash3D GameCube: serverdata levelshot skipped for local gcmap
+28:35:825 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:14] Xash3D GameCube: R_EdgeDrawingGcmapProbe flags=0x1 use_gx=1
+28:35:825 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:14] Xash3D GameCube: R_EdgeDrawing GX CapFaces begin
+28:40:822 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:15] Xash3D GameCube: CapFaces/pack CMPR diag tex=85 name=#wt/rockwall021b 128x128 shift=1 levels=4 low=1 hot=0 bounce=1 aram=0x102160 data=0x81489b40 bytes=10912 hdr=52883184f898e8e0
+28:46:543 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:17] Xash3D GameCube: R_EdgeDrawing GX CapFaces drawn=417
+28:46:552 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:17] Xash3D GameCube: HUD call SPR_Load skip CapFaces sprites/gc_320hud2.spr
+28:46:552 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:17] Xash3D GameCube: HUD call SPR_Load skip CapFaces sprites/320_pain.spr
+28:46:552 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:17] Xash3D GameCube: HUD call SPR_Load skip CapFaces sprites/320_train.spr
+28:46:708 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:17] Xash3D GameCube: lean HUD on CapFaces Flipper
+28:46:955 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:17] Xash3D GameCube: CapFaces Flipper DumpFrames hold armed
+28:48:813 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:17] Xash3D GameCube: ARAM reserve soundscape 1.35 Mb at 0x00a4b9e0 free=593.22 Kb
+28:50:970 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:18] Xash3D GameCube: soundscape pack media/ss_d2_lostcoast.gcs ready (step 4, refs 225, 1383 Kb): 7 entities, 34 rules, 40 waves, 22050 Hz
+28:50:972 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:18] Xash3D GameCube: soundscape entity 0 active (4 rules)
+28:50:987 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:18] Xash3D GameCube: server PM_Move skipped (CapFaces clipnodes remapped)
+28:51:271 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:18] Xash3D GameCube: HUD call SPR_Load skip CapFaces sprites/gc_320hud2.spr
+28:51:271 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:18] Xash3D GameCube: HUD call SPR_Load skip CapFaces sprites/320_pain.spr
+28:51:271 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:18] Xash3D GameCube: HUD call SPR_Load skip CapFaces sprites/320_train.spr
+28:51:694 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:18] Xash3D GameCube: HUD call SPR_Load skip CapFaces sprites/gc_320hud2.spr
+28:51:694 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:18] Xash3D GameCube: HUD call SPR_Load skip CapFaces sprites/320_pain.spr
+28:51:694 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:18] Xash3D GameCube: HUD call SPR_Load skip CapFaces sprites/320_train.spr
+28:53:580 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:18] Xash3D GameCube: lean HUD skipped (CapFaces Flipper)
+28:54:519 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:18] Xash3D GameCube: CapFaces listen skip viewmodel (white-skin overlay)
+30:17:743 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:23] Xash3D GameCube: soundscape played=4
+30:17:743 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:23] Xash3D GameCube: audio telemetry soundscape-tick chunks=401 nonzero=230 callbacks=400 addfail=1 peak=1001 maxpeak=10805 asnd=409600 voice=1 initialized=1
+30:39:037 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:23] Xash3D GameCube: world draw frame=300 capfaces=417 view=(1656 2213 16)
+28:12:661 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: Xash3D GameCube: disc boot override gccapfacessmoke
+28:12:771 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: Xash3D GameCube: linked gamedir=lostcoast detected=(none)
+28:12:771 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:09] Xash3D GameCube: linked gamedir=lostcoast detected=(none)
+28:12:905 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: Xash3D GameCube: disc boot override gccapfacessmoke
+28:19:153 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:10] Xash3D GameCube: smoke boot mode=1 (gcmap=9, storage=1)
+28:19:153 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:10] Program args: xash xash -dev 2 -log -game lostcoast -gcworldrender -gccapfacessmoke -gcmap d2_lostcoast -gcdumpeye 1656,2213,16,8,150 -gcdumpframes -width 320 -height 240 
+28:20:338 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:11] Xash3D GameCube: screen init minimal for gcmap smoke route
+28:20:347 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:11] Xash3D GameCube: gcmap lookup begin
+28:20:352 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:11] Xash3D GameCube: G201 delta reinit skipped (newgame/gcmap)
+28:21:137 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:11] Xash3D GameCube: world texture pack pool using map-load arena tail 448 Kb
+28:23:680 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:11] Xash3D GameCube: CapFaces BSP preflight surfaces=1 surf_block=184 bytes image=528.96 Kb cap=3.69 Mb 竊 WORLDDL (skip live surfaces, PVS cluster DLs)
+28:23:680 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:11] Xash3D GameCube: releasing gcmap BSP staging 528.96 Kb before surfaces
+28:23:692 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:11] Xash3D GameCube: CapFaces lean 窶 cleared surface high-slot for leafs/nodes
+28:23:692 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:11] Xash3D GameCube: bmodel surfaces begin (CapFaces lean)
+28:23:692 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:11] Xash3D GameCube: CapFaces lean surfaces 窶 skipped live table (1 faces / 184 bytes); pack owns Flipper draw
+28:23:858 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:11] Xash3D GameCube: CapFaces lean marksurfaces 窶 skipped (1 marks)
+28:23:948 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:11] Xash3D GameCube: map skyname early sky_lostcoast_hdr (before CapFaces)
+28:24:514 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:12] Xash3D GameCube: CapFaces densify skipped 窶 world DL media/wd_d2_lostcoast.gcd
+28:26:546 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:12] Xash3D GameCube: MAP_READY d2_lostcoast
+28:26:546 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: Xash3D GameCube: MAP_READY d2_lostcoast
+28:26:547 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:12] Xash3D GameCube: skip startup video scan for gcmap route
+28:26:547 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:12] Xash3D GameCube: gcmap smoke frames begin
+28:26:548 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:12] Xash3D GameCube: CapFaces bake skipped 窶 world DL media/wd_d2_lostcoast.gcd
+28:26:548 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:12] Xash3D GameCube: gcmap smoke frames ready
+28:26:549 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:12] Xash3D GameCube: HPAK integrity check skipped (gcmap/newgame/listenserver/connect)
+28:26:809 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:12] Xash3D GameCube: titles init skipped for gcmap smoke route
+28:26:811 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:12] Xash3D GameCube: client edicts using static gcmap bootstrap tables
+28:27:010 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:12] Xash3D GameCube: client edicts using static gcmap bootstrap tables
+28:27:010 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:12] Xash3D GameCube: serverdata levelshot skipped for local gcmap
+28:35:825 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:14] Xash3D GameCube: R_EdgeDrawingGcmapProbe flags=0x1 use_gx=1
+28:35:825 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:14] Xash3D GameCube: R_EdgeDrawing GX CapFaces begin
+28:40:822 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:15] Xash3D GameCube: CapFaces/pack CMPR diag tex=85 name=#wt/rockwall021b 128x128 shift=1 levels=4 low=1 hot=0 bounce=1 aram=0x102160 data=0x81489b40 bytes=10912 hdr=52883184f898e8e0
+28:46:543 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:17] Xash3D GameCube: R_EdgeDrawing GX CapFaces drawn=417
+28:46:552 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:17] Xash3D GameCube: HUD call SPR_Load skip CapFaces sprites/gc_320hud2.spr
+28:46:552 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:17] Xash3D GameCube: HUD call SPR_Load skip CapFaces sprites/320_pain.spr
+28:46:552 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:17] Xash3D GameCube: HUD call SPR_Load skip CapFaces sprites/320_train.spr
+28:46:708 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:17] Xash3D GameCube: lean HUD on CapFaces Flipper
+28:46:955 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:17] Xash3D GameCube: CapFaces Flipper DumpFrames hold armed
+28:48:813 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:17] Xash3D GameCube: ARAM reserve soundscape 1.35 Mb at 0x00a4b9e0 free=593.22 Kb
+28:50:970 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:18] Xash3D GameCube: soundscape pack media/ss_d2_lostcoast.gcs ready (step 4, refs 225, 1383 Kb): 7 entities, 34 rules, 40 waves, 22050 Hz
+28:50:972 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:18] Xash3D GameCube: soundscape entity 0 active (4 rules)
+28:50:987 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:18] Xash3D GameCube: server PM_Move skipped (CapFaces clipnodes remapped)
+28:51:271 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:18] Xash3D GameCube: HUD call SPR_Load skip CapFaces sprites/gc_320hud2.spr
+28:51:271 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:18] Xash3D GameCube: HUD call SPR_Load skip CapFaces sprites/320_pain.spr
+28:51:271 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:18] Xash3D GameCube: HUD call SPR_Load skip CapFaces sprites/320_train.spr
+28:51:694 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:18] Xash3D GameCube: HUD call SPR_Load skip CapFaces sprites/gc_320hud2.spr
+28:51:694 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:18] Xash3D GameCube: HUD call SPR_Load skip CapFaces sprites/320_pain.spr
+28:51:694 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:18] Xash3D GameCube: HUD call SPR_Load skip CapFaces sprites/320_train.spr
+28:53:580 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:18] Xash3D GameCube: lean HUD skipped (CapFaces Flipper)
+28:54:519 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:18] Xash3D GameCube: CapFaces listen skip viewmodel (white-skin overlay)
+30:17:743 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:23] Xash3D GameCube: soundscape played=4
+30:17:743 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:23] Xash3D GameCube: audio telemetry soundscape-tick chunks=401 nonzero=230 callbacks=400 addfail=1 peak=1001 maxpeak=10805 asnd=409600 voice=1 initialized=1
+30:39:037 Core/HW/EXI/EXI_DeviceIPL.cpp:306 N[OSREPORT]: [23:28:23] Xash3D GameCube: world draw frame=300 capfaces=417 view=(1656 2213 16)
