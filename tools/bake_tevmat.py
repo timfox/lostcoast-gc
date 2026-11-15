@@ -36,7 +36,7 @@ GC_TEVMAT_VERSION = 1
 GC_TEVMAT_MAX_MATS = 96
 GC_TEVMAT_MAX_DETAIL = 8
 GC_TEVMAT_REAL_DETAIL = 4  # slots kept for authored $detail textures
-GC_TEVMAT_MAX_ENVMASK = 8  # shared I4 masks for $basealphaenvmapmask
+GC_TEVMAT_MAX_ENVMASK = 8  # shared I4 masks for Source envmap alpha masks
 GC_TEVMAT_DETAIL_SIDE = 64
 GC_TEVMAT_DETAIL_BYTES = 4096 + 1024 + 256 + 64
 GC_TEVMAT_ENVMASK_BYTES = 2048  # 64² GX I4
@@ -75,12 +75,10 @@ def classify(vmt: dict[str, str] | None) -> dict | None:
 		out["detail"] = _tex_path(detail)
 		out["detail_scale"] = max(0.05, min(255.0, _num(vmt.get("$detailscale"), 4.0)))
 		out["detail_factor"] = max(0.0, min(1.0, _num(vmt.get("$detailblendfactor"), 1.0)))
-	bump = (vmt.get("$bumpmap") or "").strip()
-	if bump and not out["flags"] & F_DETAIL:
-		out["flags"] |= F_DETAIL
-		out["detail"] = BUMP_PREFIX + _tex_path(bump)
-		out["detail_scale"] = float(BUMP_TILING)
-		out["detail_factor"] = BUMP_FACTOR
+	# No stand-in for $bumpmap here. An earlier version lit a 1/8 crop of the
+	# normal map with a fixed sun and tiled it 8x as a "detail": the crop is
+	# not tileable, so its seams drew a grid across the sand. Source uses the
+	# normal map for bumped lightmaps and the envmap, not as a detail layer.
 	if _num(vmt.get("$alphatest"), 0.0) >= 1.0:
 		out["flags"] |= F_ALPHATEST
 		out["alpharef"] = int(max(1, min(255, round(_num(vmt.get("$alphatestreference"), 0.5) * 255))))
@@ -90,15 +88,17 @@ def classify(vmt: dict[str, str] | None) -> dict | None:
 		out["flags"] |= F_ALPHATEST
 		out["alpharef"] = 96
 	env = (vmt.get("$envmap") or "").strip().lower()
-	if (
-		env
-		and env not in ("0", '""', "none")
-		and _num(vmt.get("$basealphaenvmapmask"), 0.0) >= 1.0
-	):
-		base = (vmt.get("$basetexture") or "").strip()
-		if base:
+	if env and env not in ("0", '""', "none"):
+		# Lost Coast rocks and wet sand put the reflection mask in the normal
+		# map alpha. Source also supports a base texture alpha mask.
+		mask = ""
+		if _num(vmt.get("$normalmapalphaenvmapmask"), 0.0) >= 1.0:
+			mask = (vmt.get("$bumpmap") or "").strip()
+		elif _num(vmt.get("$basealphaenvmapmask"), 0.0) >= 1.0:
+			mask = (vmt.get("$basetexture") or "").strip()
+		if mask:
 			out["flags"] |= F_ENVMASK
-			out["envmask"] = _tex_path(base)
+			out["envmask"] = _tex_path(mask)
 	return out if out["flags"] else None
 
 
@@ -173,7 +173,7 @@ def _i4_tiled(lum: list[int], side: int) -> bytes:
 
 
 def _envmask_i4(rgba: bytes, w: int, h: int) -> bytes:
-	"""Resample base-texture alpha to 64² I4 for $basealphaenvmapmask."""
+	"""Bake Source's authored envmap mask to a compact, high-contrast I4 map."""
 	side = GC_TEVMAT_DETAIL_SIDE
 	lum: list[int] = []
 	for y in range(side):
@@ -191,6 +191,9 @@ def _envmask_i4(rgba: bytes, w: int, h: int) -> bytes:
 					base += 4
 					n += 1
 			lum.append(int(max(0, min(255, round(acc / max(1, n))))))
+	# The authored mask as it is. The shader squares mask x tint in linear
+	# light; in display gamma that is the mask to the power 2 / 2.2.
+	lum = [int(round(255.0 * (value / 255.0) ** (2.0 / 2.2))) for value in lum]
 	body = _i4_tiled(lum, side)
 	assert len(body) == GC_TEVMAT_ENVMASK_BYTES, len(body)
 	return body

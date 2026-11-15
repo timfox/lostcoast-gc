@@ -110,6 +110,17 @@ def up_plane(faces: np.ndarray, side: int = SIDE, k: float = K) -> np.ndarray:
 	return sample_cube(faces, d)
 
 
+def cubemap_index(bsp: bytes, mapname: str) -> dict[str, int]:
+	"""'maps/<map>/cX_Y_Z' -> index in the pack (same order as main())."""
+	names = {n.lower() for n in read_pak(bsp).namelist()}
+	out, i = {}, 0
+	for (x, y, z) in cubemap_origins(bsp):
+		if f"materials/maps/{mapname}/c{x}_{y}_{z}.vtf" in names:
+			out[f"maps/{mapname}/c{x}_{y}_{z}"] = i
+			i += 1
+	return out
+
+
 def main() -> None:
 	ap = argparse.ArgumentParser()
 	ap.add_argument("--map", type=Path, required=True)
@@ -127,13 +138,17 @@ def main() -> None:
 		if key not in names:
 			continue
 		img = up_plane(load_faces(pak.read(names[key])))
-		rgb = np.clip(img * 255.0 + 0.5, 0, 255).astype(np.uint8)
+		# LightmappedGeneric: spec = ( cube * mask * tint )^2 in linear light
+		# ($envmapcontrast 1). In display gamma that is cube_gamma^2 times
+		# ( mask * tint )^( 2 / 2.2 ), so the texture holds the squared value
+		# and the engine multiplies by the tint and the mask.
+		rgb = np.clip(img * img * 255.0 + 0.5, 0, 255).astype(np.uint8)
 		cm = gx_cmpr_encode_blocks(rgb, np.ones(rgb.shape[:2], bool))
 		cm += b"\0" * (-len(cm) % 32)
 		recs.append(struct.pack(">hhhH", x, y, z, 0))
 		blobs.append(cm)
 		sheet.append(rgb)
-	hdr = struct.pack(">4sHHHH", b"GCCM", 1, len(recs), SIDE, int(K * 256))
+	hdr = struct.pack(">4sHHHH", b"GCCM", 2, len(recs), SIDE, int(K * 256))
 	hdr += b"\0" * (32 - len(hdr))
 	tab = b"".join(recs)
 	tab += b"\0" * (-len(tab) % 32)

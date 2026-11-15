@@ -44,6 +44,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
 import struct
 import sys
 from pathlib import Path
@@ -305,6 +306,78 @@ class LmPage:
 				self.pix[y + py][x + px] = samples[sy][sx]
 
 
+def stitch_displacement_lightmaps(bsp, records) -> tuple[int, int, int]:
+	"""Soften lighting edges on contiguous, same-material displacements."""
+	edges = {}
+	for f, material, page, cell, grid, refs in records:
+		center = tuple((grid[0][0][3][k] + grid[-1][-1][3][k]) * 0.5 for k in range(3))
+		for edge in (grid[0], grid[-1], [r[0] for r in grid], [r[-1] for r in grid]):
+			start = tuple(round(v) for v in edge[0][0])
+			end = tuple(round(v) for v in edge[-1][0])
+			if start == end:
+				continue
+			if end < start:
+				edge = list(reversed(edge))
+				start, end = end, start
+			edges.setdefault((material, start, end), []).append((f, page, cell, edge, center, refs))
+
+	updates = {}
+	vertex_updates = {}
+	pairs = 0
+	for neighbors in edges.values():
+		if len(neighbors) != 2:
+			continue
+		left, right = neighbors
+		if math.dist(left[3][len(left[3]) // 2][0], right[3][len(right[3]) // 2][0]) > 2.0:
+			continue  # The displaced edges have different shapes.
+		steps = 2 * max(*(max(rec[2][2:4]) if rec[2] else len(rec[3]) for rec in (left, right)))
+		profile = []
+		for k in range(steps + 1):
+			t = k / steps
+			points = [tuple(rec[3][0][3][j] * (1 - t) + rec[3][-1][3][j] * t for j in range(3))
+				for rec in (left, right)]
+			colors = [light_at(bsp, rec[0], point) for rec, point in zip((left, right), points)]
+			profile.append((points, colors))
+		mean_difference = sum(max(abs(a - b) for a, b in zip(*colors))
+			for _, colors in profile) / len(profile)
+		if mean_difference < 32:
+			continue
+		pairs += 1
+		# Some chunks cannot fit an atlas page and use vertex lighting.
+		# Patch their shared vertices too, preserving displacement alpha.
+		for rec, other in ((left, right), (right, left)):
+			f, _, _, edge, _, refs = rec
+			for i, vertex in enumerate(edge):
+				t = i / (len(edge) - 1)
+				peer_base = tuple(other[3][0][3][j] * (1 - t) + other[3][-1][3][j] * t for j in range(3))
+				own, peer = light_at(bsp, f, vertex[3]), light_at(bsp, other[0], peer_base)
+				target = tuple((a + b) / 2 for a, b in zip(own, peer))
+				key = tuple(round(v) for v in vertex[0])
+				for dl, offset in refs.get(key, []):
+					vertex_updates.setdefault((id(dl), offset), (dl, []))[1].append(target)
+		for points, colors in profile:
+			target = tuple((a + b) / 2 for a, b in zip(*colors))
+			for rec, base in zip((left, right), points):
+				f, page, cell, _, center, _ = rec
+				if cell is None:
+					continue
+				for inward, weight in ((0.0, 1.0), (1.0 / max(cell[2], cell[3]), 0.5)):
+					p = tuple(base[j] + (center[j] - base[j]) * inward for j in range(3))
+					s, t, lw, lh = luxel_uv(bsp, f, p)
+					u, v = cell_st(cell, s, t, lw, lh)
+					x = max(cell[0], min(cell[0] + cell[2] - 1, round(u * 32 - 0.5)))
+					y = max(cell[1], min(cell[1] + cell[3] - 1, round(v * 32 - 0.5)))
+					updates.setdefault((page, x, y), []).append((target, weight))
+	for (page, x, y), values in updates.items():
+		original = page.pix[y][x]
+		page.pix[y][x] = tuple(round(sum(original[c] * (1 - w) + t[c] * w for t, w in values) / len(values))
+			for c in range(3))
+	for (_, offset), (dl, colors) in vertex_updates.items():
+		for c in range(3):
+			dl[offset + c] = max(0, min(255, round(sum(v[c] for v in colors) / len(colors))))
+	return pairs, len(updates), len(vertex_updates)
+
+
 class Chunk:
 	"""All geometry assigned to one PVS cluster."""
 
@@ -330,12 +403,22 @@ class Chunk:
 				self.maxs[a] = max(self.maxs[a], key[a])
 		return idx
 
-	def emit(self, mat: int, prim: int, verts: list) -> None:
+	def emit(self, mat: int, prim: int, verts: list, color_refs=None) -> None:
 		"""verts: (pos, rgba, nrm, s, t, lm_u, lm_v)."""
-		dl = self.batches.setdefault(mat, bytearray())
+		# Reflective surfaces that face up get their own batch: the engine
+		# looks their cubemap up through the mirror direction of a level
+		# surface, which only they have.
+		nz = sum(v[2][2] for v in verts) / max(1, len(verts))
+		nl = max(1e-6, sum(sum(c * c for c in v[2]) ** 0.5 for v in verts) / max(1, len(verts)))
+		key = mat | (0x10000 if nz / nl >= 0.7 else 0)
+		dl = self.batches.setdefault(key, bytearray())
 		dl += struct.pack(">BH", prim | GX_VTXFMT, len(verts))
 		for p, c, nrm, s, t, lu, lv in verts:
 			nx, ny, nz = pack_nrm(nrm)
+			if color_refs is not None:
+				key = tuple(round(v) for v in p)
+				if key in color_refs:
+					color_refs[key].append((dl, len(dl) + 5))
 			# 15 bytes per vertex: the chunk cache is the scarce resource, so
 			# normals are s8 (6 fraction bits) and lightmap UV u8, not s16.
 			dl += struct.pack(
@@ -361,7 +444,7 @@ class Chunk:
 		for i, m in enumerate(mats):
 			dl = bytearray(self.batches[m])
 			pad32(dl)  # GX NOPs
-			struct.pack_into(">HHII", out, 16 + 12 * i, m, 0, len(out), len(dl))
+			struct.pack_into(">HHII", out, 16 + 12 * i, m & 0xFFFF, m >> 16, len(out), len(dl))
 			out += dl
 		lm_ofs = 0
 		# Pages are assigned before encode(), largest walls first, so the
@@ -389,45 +472,55 @@ def st_for(ti, tw, th, pts) -> list[tuple[float, float]]:
 	return [(s - s0, t - t0) for s, t in st]
 
 
-def load_envmap(names: dict) -> tuple[dict[str, int], set[str]]:
-	"""Material path → specular strength, plus the $basealphaenvmapmask set.
+def load_envmap(names: dict, cube_ix: dict[str, int], pak) -> tuple[dict[str, int], set[str], list]:
+	"""Material path -> packed envmap word, the $basealphaenvmapmask set and
+	the tint palette.
 
-	VBSP patch names (maps/<map>/…_x_y_z) resolve through _material_aliases so
-	monastery frescos / metal pick up $envmap from the base VMT.
+	Word: ( cubemap index + 1 ) << 8 | tint palette index. The cubemap is the
+	one VBSP patched into the material ("$envmap" "maps/<map>/cX_Y_Z"); the
+	tint is $envmaptint to the power 2 / 2.2 (see bake_lostcoast_cubemaps).
+	Materials without a patched cubemap get no reflection, as on PC.
 	"""
 	out: dict[str, int] = {}
 	basealpha: set[str] = set()
-	vpks = None
-	try:
-		from bake_lostcoast_map import (
-			_load_vmt_for_mat,
-			envmap_strength_byte,
-			material_has_envmap,
-		)
-		from vpk import open_vpk_roots
-		import bake_tevmat
+	palette: list[tuple[int, int, int]] = []
+	from bake_lostcoast_map import _load_vmt_for_mat
+	from vpk import open_vpk_roots
+	import bake_tevmat
 
-		roots = sorted((ROOT / "content" / "lostcoast").glob("*_dir.vpk"))
-		roots += sorted((ROOT / "content" / "hl2").glob("*_dir.vpk"))
-		vpks = open_vpk_roots(roots) if roots else None
-		has_env, strength, load_vmt = material_has_envmap, envmap_strength_byte, _load_vmt_for_mat
-		extract = ROOT / "cache" / "extracted"
-		_num = bake_tevmat._num
-	except Exception as exc:
-		print(f"  envmap VMT scan skipped: {exc}")
-		has_env = strength = load_vmt = vpks = extract = _num = None
+	roots = sorted((ROOT / "content" / "lostcoast").glob("*_dir.vpk"))
+	roots += sorted((ROOT / "content" / "hl2").glob("*_dir.vpk"))
+	vpks = open_vpk_roots(roots)
+	extract = ROOT / "cache" / "extracted"
+	pak_names = {n.lower(): n for n in pak.namelist()}
 	for name in names:
-		if vpks and load_vmt and has_env and strength:
-			vmt = load_vmt(vpks, name, extract)
-			if vmt and has_env(vmt):
-				out[name] = strength(vmt)
-				if _num and _num(vmt.get("$basealphaenvmapmask"), 0.0) >= 1.0:
-					basealpha.add(name)
+		vmt = _load_vmt_for_mat(vpks, name, extract)
+		if not vmt:
+			continue
+		# VBSP's patch material in the BSP pak names the cubemap.
+		env = ""
+		pk = "materials/" + name.lower() + ".vmt"
+		if pk in pak_names:
+			m = re.search(r'"\$envmap"\s+"([^"]+)"', pak.read(pak_names[pk]).decode("latin-1"), re.I)
+			if m:
+				env = m.group(1).strip().lower().replace("\\", "/")
+		if env not in cube_ix:
+			continue
+		nums = [float(x) for x in re.findall(r"[-+]?\d*\.?\d+", vmt.get("$envmaptint") or "1 1 1")][:3]
+		if len(nums) < 3:
+			nums = [1.0, 1.0, 1.0]
+		if "{" in (vmt.get("$envmaptint") or ""):
+			nums = [v / 255.0 for v in nums]  # { r g b } is a byte colour
+		tint = tuple(int(max(0, min(255, round(255.0 * max(0.0, v) ** (2.0 / 2.2))))) for v in nums)
+		if tint not in palette:
+			if len(palette) >= 16:
 				continue
-		if "sand" in name:
-			out[name] = 140
-	print(f"  envmap materials: {len(out)} basealpha={len(basealpha)}")
-	return out, basealpha
+			palette.append(tint)
+		out[name] = ((cube_ix[env] + 1) << 8) | palette.index(tint)
+		if bake_tevmat._num(vmt.get("$basealphaenvmapmask"), 0.0) >= 1.0:
+			basealpha.add(name)
+	print(f"  envmap materials: {len(out)} basealpha={len(basealpha)} tints={palette}")
+	return out, basealpha, palette
 
 
 def tevmat_id_for(name: str, tevmat_ids: dict[str, int]) -> int:
@@ -458,7 +551,14 @@ def bake(map_bsp: Path, out_dir: Path, max_disp_power: int) -> None:
 	mat_recs: list[tuple[int, int, int, int, int]] = []
 	t2_path = out_dir / "tex2-names.json"
 	tex2_names = json.loads(t2_path.read_text()) if t2_path.is_file() else {}
-	envmap, basealpha_mats = load_envmap(names)
+	from bake_lostcoast_cubemaps import cubemap_index
+	from bake_lostcoast_cubemaps import read_pak
+	_bsp_raw = map_bsp.read_bytes()
+	envmap, basealpha_mats, env_palette = load_envmap(names, cubemap_index(_bsp_raw, stem), read_pak(_bsp_raw))
+	# Tint palette for the engine: media/et_<map>.bin, 16 x RGBA.
+	(out_dir / "media").mkdir(parents=True, exist_ok=True)
+	(out_dir / "media" / f"et_{stem}.bin").write_bytes(
+		b"".join(bytes((r, g, b, 255)) for r, g, b in env_palette).ljust(64, b"\0"))
 
 	def mat_for(texdata: int, flags: int) -> int | None:
 		name = bsp.tex_names[bsp.texdatas[texdata][0]]
@@ -492,6 +592,7 @@ def bake(map_bsp: Path, out_dir: Path, max_disp_power: int) -> None:
 	n_faces = n_disp = n_orphans = n_flat_blend = 0
 	face_ctx: dict[int, tuple] = {}  # brush face → (cluster, lightmap cell, normal)
 	ground_tris: list = []  # upward-facing world triangles, for the water depth map
+	disp_light_records = []
 
 	for fi in range(world_first, world_first + world_num):
 		f = bsp.faces[fi]
@@ -551,6 +652,10 @@ def bake(map_bsp: Path, out_dir: Path, max_disp_power: int) -> None:
 			cell = ch.lm.alloc(f[13] + 1, f[14] + 1) if samples else None
 			if cell and samples:
 				ch.lm.blit(cell, samples)
+			edge_vertices = grid[0] + grid[-1] + [row[0] for row in grid] + [row[-1] for row in grid]
+			color_refs = {tuple(round(v) for v in item[0]): [] for item in edge_vertices}
+			if samples:
+				disp_light_records.append((f, mat_recs[mat][:2], ch.lm, cell, grid, color_refs))
 			for j in range(n - 1):
 				strip = []
 				for i in range(n):
@@ -562,7 +667,7 @@ def bake(map_bsp: Path, out_dir: Path, max_disp_power: int) -> None:
 							sl, tl, lw, lh = luxel_uv(bsp, f, base)
 							lu, lv = cell_st(cell, sl, tl, lw, lh)
 						strip.append((p, col, nrm, s, t, lu, lv))
-				ch.emit(mat, GX_DRAW_TRISTRIP, strip)
+				ch.emit(mat, GX_DRAW_TRISTRIP, strip, color_refs)
 			for j in range(n - 1):
 				for i in range(n - 1):
 					a, b2, c, d = grid[j][i][0], grid[j][i + 1][0], grid[j + 1][i + 1][0], grid[j + 1][i][0]
@@ -654,6 +759,9 @@ def bake(map_bsp: Path, out_dir: Path, max_disp_power: int) -> None:
 		n_overlays += 1
 	print(f"  overlays baked: {n_overlays}/{ol // 352}")
 
+	seam_pairs, seam_texels, seam_vertices = stitch_displacement_lightmaps(bsp, disp_light_records)
+	print(f"  displacement lighting seams softened: {seam_pairs} edges, {seam_texels} texels, {seam_vertices} vertices")
+
 	# --- Water depth map ----------------------------------------------------------
 	# Top-down map of how far the ground lies under the harbor water plane
 	# (z = -64), over the playable cove. The water pass multiplies its alpha by
@@ -664,6 +772,7 @@ def bake(map_bsp: Path, out_dir: Path, max_disp_power: int) -> None:
 	DP_W, DP_H, DP_CELL, DP_X0, DP_Y0 = 128, 256, 24.0, 0.0, -1536.0
 	WATER_Z, DP_FULL = -64.0, 40.0
 	ground = [[None] * DP_W for _ in range(DP_H)]
+	above_water = [[False] * DP_W for _ in range(DP_H)]
 	for a, b2, c in ground_tris:
 		minx = min(a[0], b2[0], c[0]); maxx = max(a[0], b2[0], c[0])
 		miny = min(a[1], b2[1], c[1]); maxy = max(a[1], b2[1], c[1])
@@ -687,13 +796,15 @@ def bake(map_bsp: Path, out_dir: Path, max_disp_power: int) -> None:
 				# anything above it (a pier deck, a cliff) is not the bed.
 				if z <= WATER_Z + 8.0 and (cur is None or z > cur):
 					ground[gy][gx] = z
-				elif cur is None and z > WATER_Z + 8.0:
-					ground[gy][gx] = WATER_Z + 8.0
+				elif z > WATER_Z + 8.0:
+					# Track dry geometry separately: a later seabed triangle must
+					# still be able to replace the apparent dry cell.
+					above_water[gy][gx] = True
 	dp = bytearray(DP_W * DP_H // 2)
 	def depth_at(gx, gy):
 		z = ground[gy][gx]
 		if z is None:
-			return 15  # nothing mapped: open water
+			return 0 if above_water[gy][gx] else 15  # dry surface or open water
 		return int(max(0, min(15, round((WATER_Z - z) / DP_FULL * 15.0))))
 	for ty in range(0, DP_H, 8):
 		for tx in range(0, DP_W, 8):
