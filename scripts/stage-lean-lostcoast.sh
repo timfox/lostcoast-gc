@@ -194,9 +194,13 @@ fi
 cp -a "$BAKE/media"/sky_"${SKYNAME}"*.cmp "$STAGE/media/"
 echo "  + skybox $SKYNAME ($(ls "$STAGE/media"/sky_"${SKYNAME}"*.cmp | wc -l) sides)"
 
-# Minimal gameinfo / liblist so FS mounts the gamedir.
-cat > "$STAGE/liblist.gam" <<'EOF'
-game "Half-Life 2 Lost Coast (GX smoke)"
+# Minimal gameinfo / liblist so FS mounts the gamedir. "game" is the title
+# the engine shows (loading panel header): the retail gameinfo.txt title2
+# ("lost coasT"), upper-cased like the retail menu logo.
+LCGC_GAME_TITLE="$(sed -nE 's/^[[:space:]]*title2[[:space:]]+"([^"]*)".*/\1/p' "$LCGC_CONTENT_LOSTCOAST/gameinfo.txt" 2>/dev/null | head -1 | tr '[:lower:]' '[:upper:]')"
+LCGC_GAME_TITLE="${LCGC_GAME_TITLE:-LOST COAST}"
+cat > "$STAGE/liblist.gam" <<EOF
+game "$LCGC_GAME_TITLE"
 gamedir "lostcoast"
 fallback_dir "valve"
 type "single"
