@@ -75,19 +75,18 @@ def load_vtf(name: str) -> Image.Image:
 	img = decode_vtf(data)
 	return Image.frombytes("RGBA", (img.width, img.height), img.rgba)
 
+# Source draws console/background01 stretched over the whole 4:3 screen
+# (background01_widescreen is the 16:9 variant). The VTFs are square
+# 256x256 textures, so stretch to the screen instead of letterboxing a
+# small square in the middle.
 try:
-	bg = load_vtf("materials/console/background01_widescreen.vtf")
-	src_name = "background01_widescreen"
-except SystemExit:
 	bg = load_vtf("materials/console/background01.vtf")
 	src_name = "background01"
+except SystemExit:
+	bg = load_vtf("materials/console/background01_widescreen.vtf")
+	src_name = "background01_widescreen"
 
-hires = Image.new("RGB", (640, 480), (12, 14, 18))
-fitted = bg.convert("RGB")
-fitted.thumbnail((640, 480), Image.Resampling.LANCZOS)
-ox = (640 - fitted.size[0]) // 2
-oy = (480 - fitted.size[1]) // 2
-hires.paste(fitted, (ox, oy))
+hires = bg.convert("RGB").resize((640, 480), Image.Resampling.BICUBIC)
 soft = hires.resize((320, 240), Image.Resampling.LANCZOS)
 
 soft.save(out / "background.tga", format="TGA")

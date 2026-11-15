@@ -215,3 +215,4 @@
 | 2026-11-13 21:51 | rock-glint | 77.5 | notes/dolphin-probe-20261113-215039/compare-vs-retail.jpg |  | Rock props: additive glint on the bright flecks of the rock texture |
 | 2026-11-13 21:53 | rock-glint | 79.0 | notes/dolphin-probe-20261113-215308/compare-vs-retail.jpg |  | Rock props: additive glint on the bright flecks of the rock texture |
 | 2026-11-13 21:55 | rock-glint | 76.6 | notes/dolphin-probe-20261113-215428/compare-vs-retail.jpg |  | Rock props: cool glint on the bright flecks of the rock texture |
+| 2026-11-14 20:56 | loadscreen-fullscreen | n/a | notes/loadscreen-20261114/loading-before-after.png |  | Loading screen: was 4 squeezed strips (linear buffer sampled as GX tiles after the map-load restore); now retail console/background01 stretched full screen (engine 0eb50434fb + title bake) |
