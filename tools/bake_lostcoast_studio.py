@@ -33,6 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import source_studio as ss  # noqa: E402
 from vpk import open_vpk_roots, read_first  # noqa: E402
 from vtf import decode_vtf  # noqa: E402
+from bake_worlddl import LIGHT_EXPOSURE  # noqa: E402
 
 # HL1 activity ids (dlls/activity.h) for sequences the server looks up.
 ACT = {"idle": 1, "walk": 3, "run": 4, "fly": 5, "hop": 7, "land": 10}
@@ -95,6 +96,15 @@ MODELS = {
 DEFAULT_LOD = {"fisherman": 5, "combine_soldier": 3, "combine_super_soldier": 4, "seagull": 1}
 
 MAX_FPS = 15.0  # GC: sample animation at 15 Hz, r_studio interpolates frames
+
+# Characters drawn by Flipper itself (r_gx_actor.c): skinned on the matrix
+# palette from display lists, lit by the transform unit. The CPU only builds
+# bone matrices, so they can carry the model's own finer LODs: (near, far)
+# Source LODs, switched on the model's own VTX switch points. The MDL keeps
+# skeleton, sequences and skins; its mesh moves to <name>.gca. Flipper's
+# cost per triangle is small next to the CPU's per-bone work, so one fine
+# LOD serves every distance until the studio arena has room for a second.
+ACTOR_LODS = {"fisherman": (3,)}
 
 
 def _cstr(d: bytes, o: int) -> str:
@@ -364,9 +374,246 @@ def encode_rle(vals: list[int]) -> bytes:
 	return bytes(out)
 
 
+# ---------------------------------------------------------------- GX actor
+
+GCA_MAGIC = 0x47436163  # 'GCac'
+GCA_VERSION = 2          # 8-bit indices into per-batch array windows
+GCA_VTXFMT = 5           # r_gx_actor.c: PNMTXIDX, POS/NRM/TEX0 index16
+GX_TRIANGLES = 0x90
+GX_TRISTRIP = 0x98
+MAX_PALETTE = 10         # Flipper position/normal matrix slots (PNMTX0..9)
+BATCH_HALFLAMBERT = 0x01
+BATCH_MASKED = 0x02
+BATCH_ADDITIVE = 0x04
+
+
+def vtx_switch_points(vtx: bytes) -> list[float]:
+	_v, _vc, _a, _b, _c, _chk, _nl, _mr, nbp, bpo = struct.unpack_from("<iiHHiiiiii", vtx, 0)
+	_nm, moff = struct.unpack_from("<ii", vtx, bpo)
+	mh = bpo + moff
+	nlods, lodoff = struct.unpack_from("<ii", vtx, mh)
+	return [struct.unpack_from("<iif", vtx, mh + lodoff + i * 12)[2] for i in range(nlods)]
+
+
+def lod_geometry(mdl, vvd, vtx, lod, bones):
+	"""Tris (material, a, b, c) over local verts; verts in their bone's space."""
+	tris, vstart, used = load_mesh(mdl, vvd, vtx, lod)
+	ids = sorted({v for t in tris for v in t[1:]})
+	vmap = {v: i for i, v in enumerate(ids)}
+	pos, nrm, uv, vb = [], [], [], []
+	for vid in ids:
+		w, b, nb, p, n, t = ss.vvd_vertex(vvd, vstart, vid)
+		k = max(range(max(1, nb)), key=lambda j: w[j])
+		bi = b[k] if 0 <= b[k] < len(bones) else 0
+		p2b = bones[bi].pose_to_bone
+		pos.append(ss.mat34_xform(p2b, p))
+		nrm.append(ss.mat34_rotate(p2b, n))
+		uv.append(t)
+		vb.append(bi)
+	ltris = [(m, vmap[a], vmap[b2], vmap[c]) for m, a, b2, c in tris]
+	return ltris, pos, nrm, uv, vb, used
+
+
+MAX_BATCH_VERTS = 256   # 8-bit vertex indices, one array window per batch
+
+
+def _palette_batches(tris, vb):
+	"""Split triangles into runs that touch at most MAX_PALETTE bones and
+	MAX_BATCH_VERTS vertices (so the display list can use 8-bit indices)."""
+	order = sorted(tris, key=lambda t: tuple(sorted({vb[t[0]], vb[t[1]], vb[t[2]]})))
+	batches, cur, bones, verts = [], [], [], set()
+	for t in order:
+		need = [b for b in dict.fromkeys((vb[t[0]], vb[t[1]], vb[t[2]])) if b not in bones]
+		newv = {v for v in t if v not in verts}
+		if len(bones) + len(need) > MAX_PALETTE or len(verts) + len(newv) > MAX_BATCH_VERTS:
+			batches.append((bones, cur))
+			cur, bones, verts = [], [], set()
+			need = list(dict.fromkeys((vb[t[0]], vb[t[1]], vb[t[2]])))
+			newv = set(t)
+		bones += need
+		verts |= newv
+		cur.append(t)
+	if cur:
+		batches.append((bones, cur))
+	return batches
+
+
+def _gamma_half(x: float) -> float:
+	"""Linear light -> the world bake's texel (gamma(L * exposure) / 2), 0..1."""
+	if x <= 0.0:
+		return 0.0
+	return min(1.0, 0.5 * (x * LIGHT_EXPOSURE) ** (1.0 / 2.2))
+
+
+def _fit_curve(f) -> tuple[float, float, float]:
+	"""Least-squares a0 + a1 t + a2 t^2 to f on t in [0, 1] (Flipper's spot/spec
+	attenuation polynomial), with a0 pinned to f(0)."""
+	a0 = f(0.0)
+	ts = [i / 32.0 for i in range(33)]
+	# solve for a1, a2: minimise sum (a1 t + a2 t^2 - (f(t) - a0))^2
+	s11 = sum(t * t for t in ts)
+	s12 = sum(t ** 3 for t in ts)
+	s22 = sum(t ** 4 for t in ts)
+	r1 = sum(t * (f(t) - a0) for t in ts)
+	r2 = sum(t * t * (f(t) - a0) for t in ts)
+	det = s11 * s22 - s12 * s12
+	a1 = (r1 * s22 - r2 * s12) / det
+	a2 = (s11 * r2 - s12 * r1) / det
+	return (a0, a1, a2)
+
+
+def placement_light(cube, sun):
+	"""Ambient cube and sun at one spot -> Flipper light registers.
+
+	Each cube face is one light with attenuation t^2 (t = N.axis, t >= 0),
+	which is exactly Source's n^2-weighted ambient cube. The sun is one more
+	light whose attenuation polynomial is fitted to the gamma-encoded curve
+	gamma(amb + sun t) - gamma(amb), so the lit side ramps like the PC render
+	instead of summing two gamma-encoded terms. Everything is halved for the
+	TEV x2 stage, as the world lightmaps are.
+	"""
+	faces = [tuple(_gamma_half(c) for c in face) for face in cube]
+	amb = [sum(face[c] for face in cube) / 6.0 for c in range(3)]
+	if sun is None:
+		return faces, (0.0, 0.0, 0.0), (0.0, 0.0, 0.0), (0.0, 0.0, 0.0)
+	top = [_gamma_half(amb[c] + sun[c]) - _gamma_half(amb[c]) for c in range(3)]
+	lum = [0.3 * amb[0] + 0.59 * amb[1] + 0.11 * amb[2], 0.3 * sun[0] + 0.59 * sun[1] + 0.11 * sun[2]]
+	g0 = _gamma_half(lum[0])
+	g1 = _gamma_half(lum[0] + lum[1]) - g0 or 1.0
+
+	def lam(t):
+		return (_gamma_half(lum[0] + lum[1] * t) - g0) / g1
+
+	def half(t):
+		return lam((0.5 * t + 0.5) ** 2)
+
+	return faces, tuple(top), _fit_curve(lam), _fit_curve(half)
+
+
+def write_actor(name, mdl, vvd, vtx, bones, mat_flags, out_path: Path, placements):
+	sw = vtx_switch_points(vtx)
+	lods = []
+	for li, lod in enumerate(ACTOR_LODS[name]):
+		tris, pos, nrm, uv, vb, used = lod_geometry(mdl, vvd, vtx, lod, bones)
+		# Source picks LOD i once the metric passes LOD i's switch point; the
+		# near LOD stands in for every finer one.
+		switch = 0.0 if li == 0 else max(0.0, sw[used] if used < len(sw) else 0.0)
+		lods.append((switch, tris, pos, nrm, uv, vb, used))
+
+	buf = bytearray(64)
+
+	def pad32():
+		buf.extend(b"\0" * ((-len(buf)) % 32))
+
+	lod_ofs = []
+	stats = []
+	for switch, tris, pos, nrm, uv, vb, used in lods:
+		pad32()
+		lh = len(buf)
+		lod_ofs.append(lh)
+		buf += bytes(32)
+		m = max((abs(c) for p in pos for c in p), default=1.0)
+		pf = 0
+		while pf < 14 and m * (1 << (pf + 1)) < 32000:
+			pf += 1
+		mu = max((abs(c) for t in uv for c in t), default=1.0)
+		# u8 texcoords with 7 fraction bits cover [0, 2) at 1/128: one
+		# texel of the 128px skins, at half the bytes of s16.
+		tex_u8 = min((c for t in uv for c in t), default=0.0) >= 0.0 and mu < 255.0 / 128.0
+		tf = 7 if tex_u8 else 0
+		while not tex_u8 and tf < 14 and mu * (1 << (tf + 1)) < 32000:
+			tf += 1
+		# batches: per material, then per bone palette / 256-vertex window
+		by_mat: dict[int, list] = {}
+		for t in tris:
+			by_mat.setdefault(t[0], []).append((t[1], t[2], t[3]))
+		batch_list = []
+		for mat in sorted(by_mat):
+			flags = mat_flags.get(mat, 0)
+			for bl, bt in _palette_batches(by_mat[mat], vb):
+				batch_list.append((mat, flags, bl, bt))
+		# each batch owns a contiguous run of the arrays (shared verts repeat)
+		order, bases = [], []
+		for mat, flags, bl, bt in batch_list:
+			bases.append(len(order))
+			order += list(dict.fromkeys(v for t in bt for v in t))
+		pad32()
+		pos_ofs = len(buf)
+		for v in order:
+			buf += struct.pack(">3h", *(max(-32767, min(32767, int(round(c * (1 << pf))))) for c in pos[v]))
+		pad32()
+		nrm_ofs = len(buf)
+		for v in order:
+			n = nrm[v]
+			ln = math.sqrt(sum(c * c for c in n)) or 1.0
+			buf += struct.pack(">3b", *(max(-64, min(64, int(round(c / ln * 64)))) for c in n))
+		pad32()
+		tex_ofs = len(buf)
+		for v in order:
+			t = uv[v]
+			if tex_u8:
+				buf += bytes(max(0, min(255, int(round(c * 128.0)))) for c in t)
+			else:
+				buf += struct.pack(">2h", *(int(round(c * (1 << tf))) for c in t))
+		pad32()
+		batch_ofs = len(buf)
+		buf += bytes(32 * len(batch_list))
+		nstrips = 0
+		for bi, (mat, flags, bl, bt) in enumerate(batch_list):
+			slot = {b: k for k, b in enumerate(bl)}
+			local = {v: i for i, v in enumerate(dict.fromkeys(v for t in bt for v in t))}
+			strips = stripify(bt)
+			pad32()
+			dl0 = len(buf)
+
+			def vert(v):
+				i = local[v]
+				return bytes((slot[vb[v]] * 3, i, i, i))
+
+			loose = [s_ for s_ in strips if len(s_) == 3]
+			for s_ in strips:
+				if len(s_) == 3:
+					continue
+				buf += struct.pack(">BH", GX_TRISTRIP | GCA_VTXFMT, len(s_))
+				for v in s_:
+					buf += vert(v)
+				nstrips += 1
+			if loose:
+				buf += struct.pack(">BH", GX_TRIANGLES | GCA_VTXFMT, 3 * len(loose))
+				for s_ in loose:
+					for v in s_:
+						buf += vert(v)
+			pad32()
+			dl_size = len(buf) - dl0
+			bones12 = bytes(bl) + bytes(12 - len(bl))
+			struct.pack_into(">HBB12sIIH6x", buf, batch_ofs + bi * 32, mat, len(bl), flags, bones12,
+				dl0, dl_size, bases[bi])
+		struct.pack_into(">HHBBHIIIIB7x", buf, lh, len(order), len(batch_list), pf, tf, len(tris),
+			pos_ofs, nrm_ofs, tex_ofs, batch_ofs, 1 if tex_u8 else 0)
+		stats.append(f"lod{used}: {len(pos)} verts ({len(order)} in batch windows) {len(tris)} tris {len(batch_list)} batches {nstrips} strips")
+
+	pad32()
+	place_ofs = len(buf)
+	for pl in placements:
+		faces, sun, lam, half = placement_light(pl["cube"], pl["sun"])
+		buf += struct.pack(">3f", *pl["origin"])
+		for f in faces:
+			buf += bytes(int(round(255 * c)) for c in f) + b"\xff"
+		buf += bytes(int(round(255 * min(1.0, c))) for c in sun) + b"\xff"
+		buf += struct.pack(">3f", *pl["sundir"])
+		buf += struct.pack(">3f3f", *lam, *half)
+		buf += bytes(4)
+	pad32()
+	switch = [l[0] for l in lods] + [0.0] * (4 - len(lods))
+	struct.pack_into(">IHHHHI4f4II", buf, 0, GCA_MAGIC, GCA_VERSION, len(lods), len(bones), len(placements),
+		len(buf), *switch, *(lod_ofs + [0] * (4 - len(lod_ofs))), place_ofs)
+	out_path.write_bytes(bytes(buf))
+	print(f"  {name}.gca: {len(buf) // 1024} KB, {'; '.join(stats)}, {len(placements)} placement(s)")
+
+
 # ---------------------------------------------------------------- writer
 
-def convert(vpks, name: str, lod: int, tex_max: int, out_dir: Path, flip: bool) -> Path:
+def convert(vpks, name: str, lod: int, tex_max: int, out_dir: Path, flip: bool, placements=None) -> Path:
 	base, anim_srcs, seq_sel = MODELS[name]
 	mdl = read_first(vpks, base + ".mdl")
 	vvd = read_first(vpks, base + ".vvd")
@@ -460,6 +707,7 @@ def convert(vpks, name: str, lod: int, tex_max: int, out_dir: Path, flip: bool) 
 	ncd, cdidx = struct.unpack_from("<ii", mdl, 212)
 	cds = [_cstr(mdl, struct.unpack_from("<i", mdl, cdidx + i * 4)[0]).replace("\\", "/") for i in range(ncd)]
 	textures = []  # (name, flags, w, h, idx, pal)
+	tex_halflambert = []
 	for t in range(numtex):
 		o = texidx + t * 64
 		tname = _cstr(mdl, o + struct.unpack_from("<i", mdl, o)[0])
@@ -475,6 +723,7 @@ def convert(vpks, name: str, lod: int, tex_max: int, out_dir: Path, flip: bool) 
 			rgba = bytes([128, 128, 128, 255]) * 64
 		else:
 			w, h, rgba = img.width, img.height, img.rgba
+		tex_halflambert.append(kv.get("$halflambert") == "1" or kv.get("__shader") == "eyes")
 		if kv.get("$alphatest") == "1" or kv.get("$translucent") == "1":
 			flags |= 0x0040  # STUDIO_NF_MASKED
 		if "glint" in low or kv.get("$additive") == "1":
@@ -487,6 +736,27 @@ def convert(vpks, name: str, lod: int, tex_max: int, out_dir: Path, flip: bool) 
 
 	nskinref, nfam, skinidx = struct.unpack_from("<iii", mdl, 220)
 	skin_table = list(struct.unpack_from(f"<{nskinref * nfam}h", mdl, skinidx)) if nskinref * nfam else []
+
+	actor = name in ACTOR_LODS
+	if actor:
+		mat_flags = {}
+		for m in range(max(1, nskinref)):
+			tex = skin_table[m] if m < len(skin_table) else m
+			if tex >= len(textures):
+				continue
+			f = BATCH_HALFLAMBERT if tex_halflambert[tex] else 0
+			if textures[tex][1] & 0x0040:
+				f |= BATCH_MASKED
+			if textures[tex][1] & 0x0020:
+				f |= BATCH_ADDITIVE
+			mat_flags[m] = f
+		out_dir.joinpath("models", "lc").mkdir(parents=True, exist_ok=True)
+		write_actor(name, mdl, vvd, vtx, bones, mat_flags,
+			out_dir / "models" / "lc" / f"{name}.gca", placements or [])
+		# Flipper draws the mesh from the .gca; the MDL keeps the skeleton,
+		# sequences, bounds and skins.
+		tris = []
+		verts, vbone, norms, uvs = [], [], [], []
 
 	# ---- per material strips
 	by_mat: dict[int, list] = {}
@@ -870,13 +1140,27 @@ def main() -> int:
 	vpks = open_vpk_roots(
 		sorted(Path(args.lostcoast).glob("*_dir.vpk")) + sorted(Path(args.hl2).glob("*_dir.vpk"))
 	)
+	have = {n.strip() for n in args.models.split(",")}
+	spawns = npc_spawns(args.map, have) if args.map else []
+	light = None
+	if args.map and any(n in ACTOR_LODS for n in have):
+		from source_lightcache import LightCache, lighting_at
+		light = LightCache(args.map)
 	for name in args.models.split(","):
 		name = name.strip()
 		lod = args.lod if args.lod >= 0 else DEFAULT_LOD.get(name, 1)
-		convert(vpks, name, lod, args.tex_max, Path(args.out), args.flip)
+		places = []
+		if light and name in ACTOR_LODS:
+			for sp in spawns:
+				if sp["model"] != name:
+					continue
+				o = tuple(float(x) for x in sp["origin"].split()[:3])
+				cube, sun, sdir = lighting_at(light, o)
+				places.append({"origin": o, "cube": cube, "sun": sun, "sundir": sdir})
+				print(f"  {name} @ {sp['origin']}: sun {'visible' if sun else 'blocked'}")
+		convert(vpks, name, lod, args.tex_max, Path(args.out), args.flip, places)
 	if args.map and args.stub_bsp:
-		have = {n.strip() for n in args.models.split(",")}
-		patch_stub_bsp(args.stub_bsp, npc_spawns(args.map, have))
+		patch_stub_bsp(args.stub_bsp, spawns)
 	return 0
 
 
