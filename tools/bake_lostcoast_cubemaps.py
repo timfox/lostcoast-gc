@@ -34,7 +34,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 from vtf import _decode_dxt  # noqa: E402
 
-SIDE = 128
+SIDE = 96
+CUBE_MAX = 2.0  # linear HDR value stored as 255
 K = 6.0  # tan of the largest angle from vertical kept (80.5 degrees)
 
 
@@ -137,18 +138,23 @@ def main() -> None:
 		key = f"materials/maps/{mapname}/c{x}_{y}_{z}.vtf"
 		if key not in names:
 			continue
-		img = up_plane(load_faces(pak.read(names[key])))
+		# The map is HDR: retail samples the float cubemap (cX_Y_Z.hdr.vtf),
+		# linear light, values above 1 toward the sun.
+		hdr_key = key[:-4] + ".hdr.vtf"
+		img = up_plane(load_faces(pak.read(names[hdr_key if hdr_key in names else key])))
+		if hdr_key not in names:
+			img = img ** 2.2
 		# LightmappedGeneric: spec = ( cube * mask * tint )^2 in linear light
-		# ($envmapcontrast 1). In display gamma that is cube_gamma^2 times
-		# ( mask * tint )^( 2 / 2.2 ), so the texture holds the squared value
-		# and the engine multiplies by the tint and the mask.
-		rgb = np.clip(img * img * 255.0 + 0.5, 0, 255).astype(np.uint8)
+		# ($envmapcontrast 1). The texture holds sqrt( cube / CUBE_MAX ) so the
+		# dim sky keeps its steps in 8 bits; the engine squares it twice in the
+		# TEV and multiplies by tint^2 and mask^2.
+		rgb = np.clip(np.sqrt(np.clip(img, 0.0, CUBE_MAX) / CUBE_MAX) * 255.0 + 0.5, 0, 255).astype(np.uint8)
 		cm = gx_cmpr_encode_blocks(rgb, np.ones(rgb.shape[:2], bool))
 		cm += b"\0" * (-len(cm) % 32)
 		recs.append(struct.pack(">hhhH", x, y, z, 0))
 		blobs.append(cm)
 		sheet.append(rgb)
-	hdr = struct.pack(">4sHHHH", b"GCCM", 2, len(recs), SIDE, int(K * 256))
+	hdr = struct.pack(">4sHHHH", b"GCCM", 3, len(recs), SIDE, int(K * 256))
 	hdr += b"\0" * (32 - len(hdr))
 	tab = b"".join(recs)
 	tab += b"\0" * (-len(tab) % 32)
