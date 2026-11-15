@@ -43,11 +43,10 @@ MODELS = {
 		"models/lostcoast/fisherman/fisherman",
 		["models/lostcoast/fisherman/Fisherman_animations"],
 		[
-			# Intro_preIdle is what he does while the level waits for you;
-			# monster_generic idles on the ACT_IDLE sequence.
-			("idle", "Idle01", None),
-			("intro_preidle", "Intro_preIdle", "idle"),
-			("intro", "Intro", None),
+			# He carries weapon_oldmanharpoon, so npc_fisherman's ACT_IDLE
+			# resolves to ACT_IDLE_SUITCASE = Idle01 (Idle01_NH is the
+			# no-harpoon idle) and ACT_WALK to walk_all_Moderate.
+			("idle", "Idle01", "idle"),
 			("walk", "walk_all_Moderate", "walk"),
 			# SitDown / SitDown_PostIdle come at the gate much later; they
 			# cost ~45 KB of the 512 KB studio arena, so they wait for
@@ -709,7 +708,35 @@ def _map_entities(src_bsp: Path) -> list[dict]:
 	d = src_bsp.read_bytes()
 	off, ln = struct.unpack_from("<ii", d, 8)
 	text = d[off:off + ln].decode("latin-1", "replace")
-	return [dict(re.findall(r'"([^"]+)"\s+"([^"]*)"', b)) for b in re.findall(r"\{[^{}]*\}", text)]
+	out = []
+	for b in re.findall(r"\{[^{}]*\}", text):
+		pairs = re.findall(r'"([^"]+)"\s+"([^"]*)"', b)
+		e = dict(pairs)
+		e["__outputs"] = [(k, v) for k, v in pairs if k.startswith("On") and "," in v]
+		out.append(e)
+	return out
+
+
+def _outputs(e: dict) -> list[tuple[str, str]]:
+	"""Entity I/O pairs (output name lower-cased, "target,input,param,delay,times")."""
+	return [(k.lower(), v) for k, v in e.get("__outputs", [])]
+
+
+def _parse3(s: str) -> tuple[float, float, float]:
+	v = [float(x) for x in s.split()[:3]]
+	return (v + [0.0, 0.0, 0.0])[:3]  # type: ignore[return-value]
+
+
+def _npc_model(e: dict) -> str | None:
+	cls = e.get("classname", "")
+	model = e.get("model", "").lower().replace("\\", "/")
+	if cls == "npc_fisherman":
+		return "fisherman"
+	if cls == "npc_combine_s":
+		return "combine_super_soldier" if "super" in model else "combine_soldier"
+	if cls == "npc_seagull":
+		return "seagull"
+	return None
 
 
 def npc_spawns(src_bsp: Path, have: set[str]) -> list[dict]:
@@ -728,6 +755,50 @@ def npc_spawns(src_bsp: Path, have: set[str]) -> list[dict]:
 		if e.get("classname") == "point_template" and not int(e.get("spawnflags", "0") or 0) & 1:
 			templates |= {v.lower() for k, v in e.items() if k.lower().startswith("template") and v}
 	out = []
+	# npc_template_makers told to Spawn when the map starts (logic_auto
+	# OnMapSpawn, through logic_relays): their template stands at the
+	# maker's origin and angles from frame one. The fisherman is one: the
+	# e3_start relay spawns him on the jetty (npcmaker_fisherman), where the
+	# retail opening shot shows him. ss_Fisherman_Intro is only used when a
+	# script runs it, and nothing in the map does.
+	by_name: dict[str, list[dict]] = {}
+	for e in ents:
+		if e.get("targetname"):
+			by_name.setdefault(e["targetname"].lower(), []).append(e)
+	start_targets: list[tuple[str, str]] = []
+	todo = [(k, v) for e in ents if e.get("classname") == "logic_auto"
+		for k, v in _outputs(e) if k == "onmapspawn"]
+	seen_relays: set[str] = set()
+	while todo:
+		_k, v = todo.pop()
+		parts = v.split(",")
+		if len(parts) < 2:
+			continue
+		tgt, inp = parts[0].strip().lower(), parts[1].strip().lower()
+		start_targets.append((tgt, inp))
+		if inp == "trigger" and tgt not in seen_relays:
+			seen_relays.add(tgt)
+			for r in by_name.get(tgt, []):
+				if r.get("classname") == "logic_relay":
+					todo += [(k2, v2) for k2, v2 in _outputs(r) if k2 == "ontrigger"]
+	for tgt, inp in start_targets:
+		if inp != "spawn":
+			continue
+		for mk in by_name.get(tgt, []):
+			if mk.get("classname") != "npc_template_maker":
+				continue
+			tname = mk.get("TemplateName", "").lower()
+			for t in by_name.get(tname, []):
+				lc = _npc_model(t)
+				if not lc or lc not in have:
+					continue
+				mo = _parse3(mk.get("origin", "0 0 0"))
+				to = _parse3(t.get("origin", "0 0 0"))
+				# The NPC drops to the floor on spawn; the template's own
+				# origin is where the mapper stood it on that floor.
+				z = to[2] if math.hypot(mo[0] - to[0], mo[1] - to[1]) < 48 else mo[2]
+				out.append({"model": lc, "origin": f"{mo[0]:g} {mo[1]:g} {z:g}",
+					"angles": mk.get("angles", t.get("angles", "0 0 0")), "seq": "idle"})
 	for e in ents:
 		cls = e.get("classname", "")
 		name = e.get("targetname", "").lower()
@@ -741,8 +812,6 @@ def npc_spawns(src_bsp: Path, have: set[str]) -> list[dict]:
 			lc = "combine_super_soldier" if "super" in model else "combine_soldier"
 		elif cls == "npc_seagull":
 			lc = "seagull"
-		elif cls == "scripted_sequence" and e.get("targetname", "").lower() == "ss_fisherman_intro":
-			lc, seq = "fisherman", "intro_preidle"
 		if lc and lc in have:
 			out.append({"model": lc, "origin": org, "angles": ang, "seq": seq})
 	return out
