@@ -14,7 +14,8 @@ reflection with the same Fresnel weight and the same ripple offsets.
 Of the water's cubemaps, the one with the most light above 1.0 is used (the
 sun is at infinity; the others see it partly behind the cliffs).
 
-  header 32 bytes: "GCws", u16 version (1), u16 side, u16 k * 256, zero padded
+  header 32 bytes: "GCws", u16 version (1), u16 side, u16 k * 256,
+                   u16 lit box u0 v0 u1 v1 (x 65535; all zero = unknown), zero padded
   CMPR side x side. Lookup: uv = 0.5 + R.xy / ( 2 k R.z ), R the mirrored ray.
 """
 from __future__ import annotations
@@ -64,7 +65,17 @@ def main() -> None:
 		raise SystemExit("no HDR cubemap for the water material")
 	_score, key, excess, peak = best
 	rgb = np.clip(excess ** (1.0 / 2.2) * 255.0 + 0.5, 0, 255).astype(np.uint8)
-	body = struct.pack(">4sHHH", b"GCws", 1, SIDE, int(K * 256)).ljust(32, b"\0")
+	# Bounding box of the texels that carry light, widened to whole 4x4 CMPR
+	# blocks plus a texel for the bilinear filter. Outside it the texture is
+	# black, so the engine skips water faces whose lookups all fall outside.
+	lit_mask = excess.max(-1) > 0
+	ys, xs = np.nonzero(lit_mask)
+	x0 = max(0, (int(xs.min()) // 4) * 4 - 1)
+	y0 = max(0, (int(ys.min()) // 4) * 4 - 1)
+	x1 = min(SIDE, (int(xs.max()) // 4 + 1) * 4 + 1)
+	y1 = min(SIDE, (int(ys.max()) // 4 + 1) * 4 + 1)
+	box = [int(round(v * 65535 / SIDE)) for v in (x0, y0, x1, y1)]
+	body = struct.pack(">4sHHH4H", b"GCws", 1, SIDE, int(K * 256), *box).ljust(32, b"\0")
 	body += gx_cmpr_encode_blocks(rgb, np.ones((SIDE, SIDE), bool))
 	out = args.out / "media" / f"ws_{stem}.gcx"
 	out.write_bytes(body)
