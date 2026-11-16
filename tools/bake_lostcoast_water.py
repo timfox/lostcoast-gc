@@ -39,6 +39,124 @@ def _is_water_mat(mat: str) -> bool:
 	return "water" in low.split("/")[-1] or "/water" in low or low.startswith("nature/water")
 
 
+def _polygon_area_xy(poly) -> float:
+	return 0.5 * sum(
+		poly[i][0] * poly[(i + 1) % len(poly)][1]
+		- poly[(i + 1) % len(poly)][0] * poly[i][1]
+		for i in range(len(poly))
+	)
+
+
+def _subtract_convex_xy(subject, clip):
+	"""Subtract a convex coplanar water polygon, returning convex pieces."""
+	orientation = 1.0 if _polygon_area_xy(clip) >= 0 else -1.0
+	inside = list(subject)
+	pieces = []
+	for i, a in enumerate(clip):
+		b = clip[(i + 1) % len(clip)]
+		if not inside:
+			break
+		def side(p):
+			return orientation * ((b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0]))
+		inner, outer = [], []
+		prev, dp = inside[-1], side(inside[-1])
+		for cur in inside:
+			dc = side(cur)
+			if (dp > 0.001 and dc < -0.001) or (dp < -0.001 and dc > 0.001):
+				t = dp / (dp - dc)
+				cross = tuple(prev[k] + t * (cur[k] - prev[k]) for k in range(3))
+				inner.append(cross)
+				outer.append(cross)
+			if dc >= -0.001:
+				inner.append(cur)
+			if dc <= 0.001:
+				outer.append(cur)
+			prev, dp = cur, dc
+		if len(outer) >= 3 and abs(_polygon_area_xy(outer)) > 1.0:
+			pieces.append(outer)
+		inside = inner
+	return pieces
+
+
+def _convex_parts_xy(poly):
+	"""Triangulate a concave polygon; keep convex polygons intact."""
+	def cross(a, b, c):
+		return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+
+	sign = 1 if _polygon_area_xy(poly) >= 0 else -1
+	if all(sign * cross(poly[i - 1], poly[i], poly[(i + 1) % len(poly)]) >= -0.001
+			for i in range(len(poly))):
+		return [poly]
+	remaining = list(poly)
+	triangles = []
+	while len(remaining) > 3:
+		for i, b in enumerate(remaining):
+			a, c = remaining[i - 1], remaining[(i + 1) % len(remaining)]
+			if sign * cross(a, b, c) <= 0.001:
+				continue
+			if any(sign * cross(a, b, p) >= -0.001 and sign * cross(b, c, p) >= -0.001
+					and sign * cross(c, a, p) >= -0.001
+					for j, p in enumerate(remaining) if j not in (i - 1 if i else len(remaining) - 1, i, (i + 1) % len(remaining))):
+				continue
+			triangles.append([a, b, c])
+			del remaining[i]
+			break
+		else:
+			raise ValueError("cannot triangulate water polygon")
+	triangles.append(remaining)
+	return triangles
+
+
+def _nonoverlapping_water(cands):
+	"""Remove overlap on horizontal planes while preserving source UV mapping."""
+	planes = {}
+	out = []
+	expanded = []
+	for cand in cands:
+		pts, normal = cand[6], cand[4]
+		if normal[2] >= 0.999 and max(p[2] for p in pts) - min(p[2] for p in pts) <= 0.01:
+			for part in _convex_parts_xy(decimate_ring(pts, GC_CAP_MAX_VERTS)):
+				expanded.append(cand[:6] + (part,) + cand[7:])
+		else:
+			expanded.append(cand)
+	for cand in expanded:
+		score, area, mat, texinfo, normal, dist, pts, cx, cy, cz = cand
+		# The shoreline surface consists of convex, horizontal BSP faces.
+		# Keep other water surfaces unchanged.
+		if normal[2] < 0.999 or max(p[2] for p in pts) - min(p[2] for p in pts) > 0.01:
+			out.append(cand)
+			continue
+		original = decimate_ring(pts, GC_CAP_MAX_VERTS)
+		if len(original) < 3 or abs(_polygon_area_xy(original)) <= 1.0:
+			continue
+		key = round(sum(p[2] for p in original) / len(original), 2)
+		blocked = planes.setdefault(key, [])
+		pieces = [original]
+		for other in blocked:
+			ox0, oy0 = min(p[0] for p in other), min(p[1] for p in other)
+			ox1, oy1 = max(p[0] for p in other), max(p[1] for p in other)
+			next_pieces = []
+			for poly in pieces:
+				if (max(p[0] for p in poly) <= ox0 or min(p[0] for p in poly) >= ox1
+						or max(p[1] for p in poly) <= oy0 or min(p[1] for p in poly) >= oy1):
+					next_pieces.append(poly)
+				else:
+					next_pieces.extend(_subtract_convex_xy(poly, other))
+			pieces = next_pieces
+			if not pieces:
+				break
+		blocked.append(original)
+		for poly in pieces:
+			# Avoid losing coverage if clipping creates more than the record limit.
+			parts = [poly] if len(poly) <= GC_CAP_MAX_VERTS else [
+				[poly[0], poly[i], poly[i + 1]] for i in range(1, len(poly) - 1)
+			]
+			for part in parts:
+				out.append((score, abs(_polygon_area_xy(part)), mat, texinfo, normal, dist,
+					part, cx, cy, cz))
+	return out
+
+
 # Real Lost Coast water materials (lostcoast/nature/water_ati_*.vmt). The
 # map uses cheap001 for the surface and beneath for the underwater body.
 WATER_VMT = {
@@ -137,11 +255,13 @@ def bake_water(map_bsp: Path, lostcoast: Path, hl2: Path, out_dir: Path) -> None
 			n = (-n[0], -n[1], -n[2])
 		cands.append((score, area, mat, texinfo, n, pl[1] if not face["side"] else -pl[1], pts, cx, cy, cz))
 	cands.sort(key=lambda x: -x[0])
-	cands = cands[:GC_WATER_MAX_FACES]
+	before_overlap = len(cands)
+	cands = _nonoverlapping_water(cands)
+	print(f"  water overlap cleanup: {before_overlap} source faces -> {len(cands)} pieces")
 	params = water_material_params(open_vpk_roots(
 		sorted(Path(lostcoast).glob("*_dir.vpk")) + sorted(Path(hl2).glob("*_dir.vpk"))
 	))
-	print(f"  water faces selected: {len(cands)}/{GC_WATER_MAX_FACES}")
+	print(f"  water face candidates: {len(cands)} (limit {GC_WATER_MAX_FACES} unique faces)")
 
 	# Source Water shader $normalmap (water_ati_cheap001 / water_ati_beneath):
 	#   "$normalmap" "dev/water_normal"  (+ "$bumpmap" "dev/water_dudv")
@@ -235,6 +355,8 @@ def bake_water(map_bsp: Path, lostcoast: Path, hl2: Path, out_dir: Path) -> None
 	# 16-63 pts s16[8][3], 64-95 st s16[8][2] (/64),
 	# 96-111 plane nxyz+dist f32 BE, 112-115 tint RGBA8888
 	recs = bytearray()
+	seen_faces = set()
+	duplicates = 0
 	for score, area, mat, texinfo, n, dist, pts, cx, cy, cz in cands:
 		dpts = decimate_ring(pts, GC_CAP_MAX_VERTS)
 		nv = len(dpts)
@@ -283,18 +405,34 @@ def bake_water(map_bsp: Path, lostcoast: Path, hl2: Path, out_dir: Path) -> None
 		struct.pack_into(">HH", rec, 120, int(max(0, min(65535, params["fog_start"]))),
 			int(max(0, min(65535, params["fog_end"]))))
 		struct.pack_into(">HH", rec, 124, int(params["cheap_start"] / 4), int(params["cheap_end"] / 4))
+		# BSP water can contain opposite-winding copies of the same face.
+		# GX renders both sides, so identical geometry and vertex UVs would
+		# draw the same translucent surface and reflection more than once.
+		vertices = tuple(sorted(
+			(struct.unpack_from(">hhh", rec, 16 + i * 6),
+			 struct.unpack_from(">hh", rec, 64 + i * 4))
+			for i in range(nv)
+		))
+		plane = tuple(round(v, 5) for v in (n[0], n[1], n[2], dist))
+		key = (rec[1], bytes(rec[8:16]), vertices, plane, bytes(rec[112:128]))
+		if key in seen_faces:
+			duplicates += 1
+			continue
+		seen_faces.add(key)
 		recs += rec
+		if len(seen_faces) == GC_WATER_MAX_FACES:
+			break
 
 	hdr = bytearray(32)
 	hdr[0:4] = GC_WF_MAGIC
-	struct.pack_into(">HH", hdr, 4, GC_WF_VERSION, len(cands))
+	struct.pack_into(">HH", hdr, 4, GC_WF_VERSION, len(seen_faces))
 	struct.pack_into(">I", hdr, 8, 32)  # faces ofs
 	struct.pack_into(">HH", hdr, 12, wt_w, wt_h)
 	# $scroll2 drives the second dudv phase. Bytes 16-23 were unused.
 	struct.pack_into(">ff", hdr, 16, params["scroll2"][0], params["scroll2"][1])
 	path = media / f"gw_{stem}.gcw"
 	path.write_bytes(bytes(hdr) + bytes(recs))
-	print(f"  wrote {path} faces={len(cands)} bytes={path.stat().st_size}")
+	print(f"  wrote {path} faces={len(seen_faces)} duplicates={duplicates} bytes={path.stat().st_size}")
 
 
 def write_water_ia8(vpks, media: Path, size: int = 64) -> None:

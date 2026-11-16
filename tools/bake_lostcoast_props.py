@@ -93,6 +93,22 @@ NPC_CLASSNAMES = {
 CANISTER_FLIGHT_MODEL = "models/props_combine/headcrabcannister01a.mdl"
 # Local-space fisherman for the CapFaces lead/walk path (hdr[6]).
 FISHERMAN_WALK_MODEL = "models/lostcoast/fisherman/fisherman.mdl"
+# Characters baked as real studio models (tools/bake_lostcoast_studio.py,
+# <bake>/studio/models/lc/<name>.mdl) run on the shared r_studio.c path as
+# cycler entities; their posed stand-ins leave this pack when that file exists.
+STUDIO_NPC = {
+	"models/combine_soldier.mdl": "combine_soldier",
+	"models/combine_super_soldier.mdl": "combine_super_soldier",
+	"models/seagull.mdl": "seagull",
+	FISHERMAN_WALK_MODEL: "fisherman",
+}
+
+
+def _studio_npc(out_dir: Path, mdl: str) -> bool:
+	name = STUDIO_NPC.get(mdl.lower().replace("\\", "/"))
+	return bool(name) and (Path(out_dir).parent / "studio" / "models" / "lc" / f"{name}.mdl").is_file()
+
+
 # Opening of the VST ride. Shore rocks are packed nearest-first.
 SHORE_EYE = (1518.0, -1008.0, 52.0)
 
@@ -751,7 +767,7 @@ def bake_props(
 			elif cls in NPC_CLASSNAMES:
 				# Honor an explicit model (super soldier, etc.); else default.
 				mdl = _normalize_model(model) if model else NPC_CLASSNAMES[cls]
-				if not _skip_model(mdl):
+				if not _skip_model(mdl) and not _studio_npc(out_dir, mdl):
 					npcs.append((
 						mdl,
 						_parse_vec(cur.get("origin", "0 0 0")),
@@ -1097,7 +1113,7 @@ def bake_props(
 		flight_model = 0xFFFF if got_i is None else got_i
 	# Fisherman lead walk: bind pose faces +Y, runtime yaw wants +X.
 	walk_model = 0xFFFF
-	walk = mesh_for(FISHERMAN_WALK_MODEL)
+	walk = None if _studio_npc(out_dir, FISHERMAN_WALK_MODEL) else mesh_for(FISHERMAN_WALK_MODEL)
 	if walk:
 		got_i = add_model("walk:" + FISHERMAN_WALK_MODEL, walk[0], walk[1], rotate_walk=True)
 		walk_model = 0xFFFF if got_i is None else got_i

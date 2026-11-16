@@ -14,6 +14,7 @@ culls CapFaces with CHECKVISBIT against the eye cluster's PVS row.
 from __future__ import annotations
 
 import argparse
+import math
 import re
 import struct
 import sys
@@ -101,6 +102,7 @@ def extract_vst_path(ents: list[dict], tree) -> tuple[float, list[dict]]:
 					"name": tn,
 					"origin": o,
 					"angles": a,
+					"orientationtype": int(kv.get("orientationtype", "1")),
 					"target": kv.get("target", ""),
 					"speed": float(kv.get("speed") or 0),
 				}
@@ -142,6 +144,18 @@ def extract_vst_path(ents: list[dict], tree) -> tuple[float, list[dict]]:
 			}
 		)
 		name = t["target"]
+
+	# Source path_track type 2 uses its authored angles. Other types face
+	# the next path node (or the preceding segment at the end of the path).
+	for i, node in enumerate(ordered):
+		if tracks[node["name"]]["orientationtype"] == 2 or len(ordered) < 2:
+			continue
+		a = ordered[i]["origin"] if i + 1 < len(ordered) else ordered[i - 1]["origin"]
+		b = ordered[i + 1]["origin"] if i + 1 < len(ordered) else ordered[i]["origin"]
+		dx, dy, dz = (b[k] - a[k] for k in range(3))
+		if dx or dy or dz:
+			node["angles"] = [-math.degrees(math.atan2(dz, math.hypot(dx, dy))),
+				math.degrees(math.atan2(dy, dx)), 0.0]
 
 	speed = float(train.get("speed") or 0) or 101.0
 	return speed, ordered

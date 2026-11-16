@@ -38,12 +38,20 @@ if [[ "${LCGC_DOC_VST:-0}" == "1" ]]; then
 	# Unlimited-speed runs can dump tens of thousands of 1 MB frames (34 GB
 	# once): keep the ride itself, drop the parked tail and any torn last frame.
 	MAXF="${LCGC_VST_MAX_FRAMES:-9000}"
-	find "$LCGC_DOLPHIN_USER/Dump/Frames" -maxdepth 1 -name 'framedump_*.tga' \
-		| awk -F_ -v m="$MAXF" '{n=$NF; sub(/\.tga$/,"",n); if (n+0>m) print}' | xargs -r rm -f
+	find "$LCGC_DOLPHIN_USER/Dump/Frames" -maxdepth 1 -type f \
+		\( -name 'framedump_*.tga' -o -name 'framedump_*.png' \) \
+		| awk -F_ -v m="$MAXF" '{n=$NF; sub(/\.(tga|png)$/,"",n); if (n+0>m) print}' | xargs -r rm -f
 	find "$LCGC_DOLPHIN_USER/Dump/Frames" -maxdepth 1 -name 'framedump_*.tga' -size -900k -delete
 	python3 "$SCRIPT_DIR/../tools/doc_vst.py" "$PROBE" "$LCGC_DOLPHIN_USER/Dump/Frames" "$LABEL" --note "$NOTE"
-	# The clip and sheet are saved: free the raw dumps.
-	find "$LCGC_DOLPHIN_USER/Dump/Frames" -maxdepth 1 -name 'framedump_*' -delete
+	if [[ "${LCGC_KEEP_VST_FRAMES:-0}" == "1" ]]; then
+		# Keep the original guest frames with the rendered sheet/clip as evidence.
+		mkdir -p "$PROBE/frames"
+		find "$LCGC_DOLPHIN_USER/Dump/Frames" -maxdepth 1 -type f -name 'framedump_*' \
+			-exec mv -t "$PROBE/frames" -- {} +
+	else
+		# The clip and sheet are saved: free the raw dumps by default.
+		find "$LCGC_DOLPHIN_USER/Dump/Frames" -maxdepth 1 -name 'framedump_*' -delete
+	fi
 else
 	python3 "$SCRIPT_DIR/../tools/doc_progress.py" "$PROBE" "$LABEL" --note "$NOTE"
 fi

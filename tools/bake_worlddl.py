@@ -73,6 +73,8 @@ MAT_F_WATER = 0x01
 MAT_F_NOLIGHT = 0x02
 MAT_F_ENVMAP = 0x04
 MAT_F_BASEALPHA = 0x08  # $basealphaenvmapmask — never sand IndTex
+MAT_F_ENVNOMASK = 0x10  # $envmap authored without a mask: reflects everywhere
+ENV_SPLIT: set[int] = set()  # material indices whose batches carry a normal
 LM_PAGES_LEFT = 512
 
 
@@ -113,7 +115,7 @@ class Bsp:
 		raw = lump(d, 7)
 		fmt = "<HBBIhhhh4sif5iHHI"
 		self.faces = [struct.unpack_from(fmt, raw, i) for i in range(0, len(raw), 56)]
-		# Lost Coast ships HDR lighting only (lump 53); LDR lump 8 otherwise.
+		# Prefer HDR lighting when present; Lost Coast also contains an LDR lump.
 		self.lighting = lump(d, 53) or lump(d, 8)
 		raw = lump(d, 5)
 		self.nodes = [struct.unpack_from("<iii", raw, i) for i in range(0, len(raw), 32)]
@@ -300,10 +302,19 @@ class LmPage:
 		lh = len(samples)
 		lw = len(samples[0]) if lh else 1
 		for py in range(h):
+			fy = py * (lh - 1) / max(h - 1, 1)
+			y0 = int(fy)
+			y1 = min(lh - 1, y0 + 1)
+			fy -= y0
 			for px in range(w):
-				sx = min(lw - 1, px * lw // w)
-				sy = min(lh - 1, py * lh // h)
-				self.pix[y + py][x + px] = samples[sy][sx]
+				fx = px * (lw - 1) / max(w - 1, 1)
+				x0 = int(fx)
+				x1 = min(lw - 1, x0 + 1)
+				fx -= x0
+				self.pix[y + py][x + px] = tuple(round(
+					(samples[y0][x0][c] * (1 - fx) + samples[y0][x1][c] * fx) * (1 - fy)
+					+ (samples[y1][x0][c] * (1 - fx) + samples[y1][x1][c] * fx) * fy
+				) for c in range(3))
 
 
 def stitch_displacement_lightmaps(bsp, records) -> tuple[int, int, int]:
@@ -378,6 +389,126 @@ def stitch_displacement_lightmaps(bsp, records) -> tuple[int, int, int]:
 	return pairs, len(updates), len(vertex_updates)
 
 
+def displacement_normals(grid, face_normal):
+	"""Estimate surface normals from displaced positions, oriented to the face.
+
+	Source dispvert.vec is a displacement direction, not a shading normal.
+	Use centered differences inside the grid and one-sided differences at its
+	edges; fall back to the face normal for degenerate geometry.
+	"""
+	rows, cols = len(grid), len(grid[0])
+	out = []
+	for j in range(rows):
+		row = []
+		for i in range(cols):
+			left, right = grid[j][max(0, i - 1)][0], grid[j][min(cols - 1, i + 1)][0]
+			top, bottom = grid[max(0, j - 1)][i][0], grid[min(rows - 1, j + 1)][i][0]
+			u = [right[k] - left[k] for k in range(3)]
+			v = [bottom[k] - top[k] for k in range(3)]
+			n = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]]
+			length = math.sqrt(sum(x * x for x in n))
+			if length < 1e-8:
+				n = list(face_normal)
+			else:
+				sign = -1.0 if sum(n[k] * face_normal[k] for k in range(3)) < 0 else 1.0
+				n = [x * sign / length for x in n]
+			row.append(tuple(n))
+		out.append(row)
+	return out
+
+
+def oct12(n) -> int:
+	"""Unit vector -> 12 bits (octahedral, 6 + 6)."""
+	x, y, z = n
+	l = abs(x) + abs(y) + abs(z) or 1.0
+	x, y, z = x / l, y / l, z / l
+	if z < 0.0:
+		x, y = (1.0 - abs(y)) * (1.0 if x >= 0 else -1.0), (1.0 - abs(x)) * (1.0 if y >= 0 else -1.0)
+	return (int(round((x * 0.5 + 0.5) * 63.0)) << 6) | int(round((y * 0.5 + 0.5) * 63.0))
+
+
+def oct12_decode(code: int):
+	x = ((code >> 6) & 63) / 63.0 * 2.0 - 1.0
+	y = (code & 63) / 63.0 * 2.0 - 1.0
+	z = 1.0 - abs(x) - abs(y)
+	if z < 0.0:
+		x, y = (1.0 - abs(y)) * (1.0 if x >= 0 else -1.0), (1.0 - abs(x)) * (1.0 if y >= 0 else -1.0)
+	l = math.sqrt(x * x + y * y + z * z) or 1.0
+	return (x / l, y / l, z / l)
+
+
+def tex_orient(n, tex_axes) -> int:
+	"""How the texture's S and T run in the reflection plane's frame, 3 bits.
+
+	A normal map's X is along the surface's texture S and its Y along T
+	(Source's tangent space). The engine offsets the cubemap lookup in the
+	frame ( t, b ) of the plane axis nearest the batch normal, so it needs
+	S and T in that frame: the nearest of the eight axis-aligned layouts.
+	bit 0: S runs along b (swap), bit 1: first row negative, bit 2: second.
+	The sand is mapped S = +x, T = -y: code 4, i.e. Y flipped.
+	"""
+	if not tex_axes:
+		return 0
+	from bake_lostcoast_cubemaps import AXES, axis_frame, nearest_axis
+	t, b = axis_frame(AXES[nearest_axis(n)])
+	def unit(v):
+		l = math.sqrt(sum(c * c for c in v)) or 1.0
+		return [c / l for c in v]
+	sv, tv = unit(tex_axes[0][:3]), unit(tex_axes[1][:3])
+	j = [[sum(sv[k] * t[k] for k in range(3)), sum(tv[k] * t[k] for k in range(3))],
+		[sum(sv[k] * b[k] for k in range(3)), sum(tv[k] * b[k] for k in range(3))]]
+	best, code = -9.0, 0
+	for o in range(8):
+		sx, sy = (-1.0 if o & 2 else 1.0), (-1.0 if o & 4 else 1.0)
+		score = (sx * j[0][1] + sy * j[1][0]) if o & 1 else (sx * j[0][0] + sy * j[1][1])
+		if score > best:
+			best, code = score, o
+	return code
+
+
+def env_code(verts, tex_axes=None, base_normal=None) -> int:
+	"""Batch word for a reflective primitive: 0x8000 | texture layout << 12 |
+	its normal, or 0.
+
+	A flat brush face keeps its own normal, so its reflection is exact.
+	Displacement strips curve: they go to the nearest of a few directions
+	(up, or 22.5 degree steps round the compass, level or raised 45 degrees)
+	so that a rock face is a handful of batches, not one per triangle.
+	Surfaces that face down get no reflection pass.
+	"""
+	if base_normal is not None:
+		# A displacement: every strip reflects about the plane of the face
+		# it was built on (the normal map supplies the relief). Binning each
+		# strip by its own tilt put neighbouring strips of one beach up to
+		# 45 degrees apart, which showed as bands where patches meet.
+		n = list(base_normal)
+		if n[2] < -0.5:
+			return 0
+		return 0x8000 | (tex_orient(n, tex_axes) << 12) | oct12(n)
+	n = [sum(v[2][k] for v in verts) for k in range(3)]
+	l = math.sqrt(sum(c * c for c in n))
+	if l < 1e-6:
+		return 0
+	n = [c / l for c in n]
+	if n[2] < -0.5:
+		return 0
+	n0 = verts[0][2]
+	l0 = math.sqrt(sum(c * c for c in n0)) or 1.0
+	flat = all(
+		abs(v[2][k] / (math.sqrt(sum(c * c for c in v[2])) or 1.0) - n0[k] / l0) < 1e-3
+		for v in verts for k in range(3)
+	)
+	if not flat:
+		if n[2] >= 0.92:
+			n = [0.0, 0.0, 1.0]
+		else:
+			step = math.pi / 8.0
+			az = round(math.atan2(n[1], n[0]) / step) * step
+			el = math.pi / 4.0 if n[2] > 0.38 else 0.0
+			n = [math.cos(az) * math.cos(el), math.sin(az) * math.cos(el), math.sin(el)]
+	return 0x8000 | (tex_orient(n, tex_axes) << 12) | oct12(n)
+
+
 class Chunk:
 	"""All geometry assigned to one PVS cluster."""
 
@@ -403,14 +534,12 @@ class Chunk:
 				self.maxs[a] = max(self.maxs[a], key[a])
 		return idx
 
-	def emit(self, mat: int, prim: int, verts: list, color_refs=None) -> None:
+	def emit(self, mat: int, prim: int, verts: list, color_refs=None, tex_axes=None, base_normal=None) -> None:
 		"""verts: (pos, rgba, nrm, s, t, lm_u, lm_v)."""
-		# Reflective surfaces that face up get their own batch: the engine
-		# looks their cubemap up through the mirror direction of a level
-		# surface, which only they have.
-		nz = sum(v[2][2] for v in verts) / max(1, len(verts))
-		nl = max(1e-6, sum(sum(c * c for c in v[2]) ** 0.5 for v in verts) / max(1, len(verts)))
-		key = mat | (0x10000 if nz / nl >= 0.7 else 0)
+		# Reflective surfaces are batched by their normal: the engine mirrors
+		# the view about it and looks the cubemap up with one projective
+		# texgen per batch (see env_code).
+		key = mat | ((env_code(verts, tex_axes, base_normal) << 16) if mat in ENV_SPLIT else 0)
 		dl = self.batches.setdefault(key, bytearray())
 		dl += struct.pack(">BH", prim | GX_VTXFMT, len(verts))
 		for p, c, nrm, s, t, lu, lv in verts:
@@ -472,7 +601,7 @@ def st_for(ti, tw, th, pts) -> list[tuple[float, float]]:
 	return [(s - s0, t - t0) for s, t in st]
 
 
-def load_envmap(names: dict, cube_ix: dict[str, int], pak) -> tuple[dict[str, int], set[str], list]:
+def load_envmap(names: dict, cube_ix: dict[str, int], pak) -> tuple[dict[str, int], set[str], list, set[str]]:
 	"""Material path -> packed envmap word, the $basealphaenvmapmask set and
 	the tint palette.
 
@@ -483,6 +612,7 @@ def load_envmap(names: dict, cube_ix: dict[str, int], pak) -> tuple[dict[str, in
 	"""
 	out: dict[str, int] = {}
 	basealpha: set[str] = set()
+	nomask: set[str] = set()
 	palette: list[tuple[int, int, int]] = []
 	from bake_lostcoast_map import _load_vmt_for_mat
 	from vpk import open_vpk_roots
@@ -511,7 +641,13 @@ def load_envmap(names: dict, cube_ix: dict[str, int], pak) -> tuple[dict[str, in
 			nums = [1.0, 1.0, 1.0]
 		if "{" in (vmt.get("$envmaptint") or ""):
 			nums = [v / 255.0 for v in nums]  # { r g b } is a byte colour
-		tint = tuple(int(max(0, min(255, round(255.0 * max(0.0, v) ** (2.0 / 2.2))))) for v in nums)
+		# Engine constant = tint^2 x LIGHT_EXPOSURE / 2 (linear; the TEV scales
+		# make up the rest, see R_GXWorldDLEnvOn).
+		tint = tuple(int(max(0, min(255, round(255.0 * 0.5 * LIGHT_EXPOSURE * max(0.0, v) ** 2.0)))) for v in nums)
+		# ( cube x tint )^2 with a tint this small is under one step of the
+		# frame buffer even at the sun: no pass.
+		if max(tint) <= 2:
+			continue
 		if tint not in palette:
 			if len(palette) >= 16:
 				continue
@@ -519,8 +655,10 @@ def load_envmap(names: dict, cube_ix: dict[str, int], pak) -> tuple[dict[str, in
 		out[name] = ((cube_ix[env] + 1) << 8) | palette.index(tint)
 		if bake_tevmat._num(vmt.get("$basealphaenvmapmask"), 0.0) >= 1.0:
 			basealpha.add(name)
-	print(f"  envmap materials: {len(out)} basealpha={len(basealpha)} tints={palette}")
-	return out, basealpha, palette
+		elif bake_tevmat._num(vmt.get("$normalmapalphaenvmapmask"), 0.0) < 1.0 and not (vmt.get("$envmapmask") or "").strip():
+			nomask.add(name)
+	print(f"  envmap materials: {len(out)} basealpha={len(basealpha)} nomask={len(nomask)} tints={palette}")
+	return out, basealpha, palette, nomask
 
 
 def tevmat_id_for(name: str, tevmat_ids: dict[str, int]) -> int:
@@ -554,7 +692,7 @@ def bake(map_bsp: Path, out_dir: Path, max_disp_power: int) -> None:
 	from bake_lostcoast_cubemaps import cubemap_index
 	from bake_lostcoast_cubemaps import read_pak
 	_bsp_raw = map_bsp.read_bytes()
-	envmap, basealpha_mats, env_palette = load_envmap(names, cubemap_index(_bsp_raw, stem), read_pak(_bsp_raw))
+	envmap, basealpha_mats, env_palette, nomask_mats = load_envmap(names, cubemap_index(_bsp_raw, stem), read_pak(_bsp_raw))
 	# Tint palette for the engine: media/et_<map>.bin, 16 x RGBA.
 	(out_dir / "media").mkdir(parents=True, exist_ok=True)
 	(out_dir / "media" / f"et_{stem}.bin").write_bytes(
@@ -571,10 +709,23 @@ def bake(map_bsp: Path, out_dir: Path, max_disp_power: int) -> None:
 				mflags |= MAT_F_ENVMAP
 				if name in basealpha_mats:
 					mflags |= MAT_F_BASEALPHA
+				if name in nomask_mats:
+					mflags |= MAT_F_ENVNOMASK
+				ENV_SPLIT.add(len(mat_recs))
 			mat_index[name] = len(mat_recs)
 			t2 = tex2_names.get(name)
 			mat_recs.append((fnv1a32(names[name]), fnv1a32(t2) if t2 else 0,
 				tevmat_id_for(name, tevmat_ids), mflags, strength & 0xFFFF))
+		return mat_index[name]
+
+	def mat_named(name: str) -> int | None:
+		if name not in names:
+			return None
+		if name not in mat_index:
+			mat_index[name] = len(mat_recs)
+			t2 = tex2_names.get(name)
+			mat_recs.append((fnv1a32(names[name]), fnv1a32(t2) if t2 else 0,
+				tevmat_id_for(name, tevmat_ids), 0, 0))
 		return mat_index[name]
 
 	# Face → cluster from the leaf face lists (first leaf that references it).
@@ -633,8 +784,12 @@ def bake(map_bsp: Path, out_dir: Path, max_disp_power: int) -> None:
 					row.append((p, light_at(bsp, f, base) + (int(max(0, min(255, round(alpha)))),),
 						(vx, vy, vz), base))
 				grid.append(row)
-			# g[0] is the displaced world position. g[2] is the normal, and
-			# feeding that to the texvecs made a whole cliff one texel.
+			plane = bsp.planes[f[0]]
+			sign = -1.0 if f[1] else 1.0
+			normals = displacement_normals(grid, tuple(plane[k] * sign for k in range(3)))
+			grid = [[(item[0], item[1], normals[j][i], item[3])
+				for i, item in enumerate(row)] for j, row in enumerate(grid)]
+			# Texture coordinates use displaced world positions, not normals.
 			flat = [g[0] for row in grid for g in row]
 			sts = st_for(ti, tw, th, flat)
 			mid = grid[n // 2][n // 2][0]
@@ -667,7 +822,8 @@ def bake(map_bsp: Path, out_dir: Path, max_disp_power: int) -> None:
 							sl, tl, lw, lh = luxel_uv(bsp, f, base)
 							lu, lv = cell_st(cell, sl, tl, lw, lh)
 						strip.append((p, col, nrm, s, t, lu, lv))
-				ch.emit(mat, GX_DRAW_TRISTRIP, strip, color_refs)
+				ch.emit(mat, GX_DRAW_TRISTRIP, strip, color_refs, tex_axes=(ti[0], ti[1]),
+					base_normal=tuple(plane[k] * sign for k in range(3)))
 			for j in range(n - 1):
 				for i in range(n - 1):
 					a, b2, c, d = grid[j][i][0], grid[j][i + 1][0], grid[j + 1][i + 1][0], grid[j + 1][i][0]
@@ -710,7 +866,7 @@ def bake(map_bsp: Path, out_dir: Path, max_disp_power: int) -> None:
 				sl, tl, lw, lh = luxel_uv(bsp, f, p)
 				lu, lv = cell_st(cell, sl, tl, lw, lh)
 			verts.append((p, col, nrm, s, t, lu, lv))
-		ch.emit(mat, GX_DRAW_TRIFAN, verts)
+		ch.emit(mat, GX_DRAW_TRIFAN, verts, tex_axes=(ti[0], ti[1]))
 		if nrm[2] > 0.5 and not water:
 			for k in range(1, len(pts) - 1):
 				ground_tris.append((pts[0], pts[k], pts[k + 1]))
@@ -758,6 +914,78 @@ def bake(map_bsp: Path, out_dir: Path, max_disp_power: int) -> None:
 		chunks[cluster].emit(omat, GX_DRAW_TRIFAN, verts)
 		n_overlays += 1
 	print(f"  overlays baked: {n_overlays}/{ol // 352}")
+
+	# --- infodecals (tools/bake_infodecals.py) --------------------------------
+	# Source projects each infodecal onto the surface it sits on when the map
+	# loads. Host = brush face whose plane holds the origin (within 16 units)
+	# and whose polygon contains it. Size = texture pixels x $decalscale, image
+	# up = world up on the plane (X axis on level ground); one alpha-tested quad
+	# a unit off the host, lit by the host's lightmap, from the shared atlas.
+	n_decals = 0
+	dec_path = out_dir / "infodecals.json"
+	if dec_path.is_file() and "lostcoast/decals/atlas" in names:
+		dinfo = json.loads(dec_path.read_text())
+		dmat = mat_named("lostcoast/decals/atlas")
+		for dec in dinfo["decals"]:
+			org = tuple(dec["origin"])
+			tile = dinfo["tiles"][dec["texture"]]
+			best = None
+			for fi, (cl, cell, hn) in face_ctx.items():
+				f = bsp.faces[fi]
+				pl = bsp.planes[f[0]]
+				sg = -1.0 if f[1] else 1.0
+				dist = (org[0] * hn[0] + org[1] * hn[1] + org[2] * hn[2]) - pl[3] * sg
+				if abs(dist) > 16.0 or (best and abs(dist) >= best[0]):
+					continue
+				pts = bsp.face_pts(f)
+				pr = tuple(org[a] - hn[a] * dist for a in range(3))
+				pos = neg = 0
+				for k in range(len(pts)):
+					a0, b0 = pts[k], pts[(k + 1) % len(pts)]
+					e = (b0[0] - a0[0], b0[1] - a0[1], b0[2] - a0[2])
+					w = (pr[0] - a0[0], pr[1] - a0[1], pr[2] - a0[2])
+					cx = (e[1] * w[2] - e[2] * w[1], e[2] * w[0] - e[0] * w[2], e[0] * w[1] - e[1] * w[0])
+					d = cx[0] * hn[0] + cx[1] * hn[1] + cx[2] * hn[2]
+					pos += d > 0.5
+					neg += d < -0.5
+				if not (pos and neg):
+					best = (abs(dist), fi, pr, pts)
+			if not best:
+				continue
+			_d, host, ctr, hpts = best
+			cluster, cell, hn = face_ctx[host]
+			hf = bsp.faces[host]
+			if abs(hn[2]) > 0.99:
+				upv = (0.0, 1.0, 0.0)
+			else:
+				upv = (0.0, 0.0, 1.0)
+			rgt = (upv[1] * hn[2] - upv[2] * hn[1], upv[2] * hn[0] - upv[0] * hn[2], upv[0] * hn[1] - upv[1] * hn[0])
+			rl = math.sqrt(sum(c * c for c in rgt)) or 1.0
+			rgt = tuple(c / rl for c in rgt)
+			upv = (hn[1] * rgt[2] - hn[2] * rgt[1], hn[2] * rgt[0] - hn[0] * rgt[2], hn[0] * rgt[1] - hn[1] * rgt[0])
+			hw, hh = tile["size"][0] * 0.5, tile["size"][1] * 0.5
+			u0, v0, u1, v1 = tile["uv"]
+			corners = ((-hw, hh, u0, v0), (-hw, -hh, u0, v1), (hw, -hh, u1, v1), (hw, hh, u1, v0))
+			quad = []
+			for x, y, cu, cv in corners:
+				pt = tuple(ctr[a] + rgt[a] * x + upv[a] * y + hn[a] * 1.0 for a in range(3))
+				lu, lv = (0.0, 0.0)
+				if cell:
+					sl, tl, lw, lh = luxel_uv(bsp, hf, pt)
+					lu, lv = cell_st(cell, max(0.0, min(lw - 1.0, sl)), max(0.0, min(lh - 1.0, tl)), lw, lh)
+				quad.append((pt, light_at(bsp, hf, pt) + (255,), hn, cu, cv, lu, lv))
+			# Match the winding of the host's own polygon (Source: clockwise).
+			def _wind(q):
+				a0, b0, c0 = q[0], q[1], q[2]
+				e1 = tuple(b0[i] - a0[i] for i in range(3))
+				e2 = tuple(c0[i] - a0[i] for i in range(3))
+				cr = (e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0])
+				return cr[0] * hn[0] + cr[1] * hn[1] + cr[2] * hn[2]
+			if _wind([v[0] for v in quad]) * _wind(hpts) < 0:
+				quad = [quad[0], quad[3], quad[2], quad[1]]
+			chunks[cluster].emit(dmat, GX_DRAW_TRIFAN, quad)
+			n_decals += 1
+		print(f"  infodecals baked: {n_decals}/{len(dinfo['decals'])}")
 
 	seam_pairs, seam_texels, seam_vertices = stitch_displacement_lightmaps(bsp, disp_light_records)
 	print(f"  displacement lighting seams softened: {seam_pairs} edges, {seam_texels} texels, {seam_vertices} vertices")
@@ -903,6 +1131,18 @@ def bake(map_bsp: Path, out_dir: Path, max_disp_power: int) -> None:
 			lm_pages += page
 	LM_PAGES_LEFT = 512 - min(512, len(ranked))
 	chunk_blobs = [chunks[c].encode() for c in order]
+	# The (cubemap, plane axis) pairs the reflective batches look up, for
+	# tools/bake_lostcoast_cubemaps.py (media/cm_<map>.gcm holds only these).
+	from bake_lostcoast_cubemaps import nearest_axis
+	env_pairs = set()
+	n_env_batches = 0
+	for ch in chunks.values():
+		for key in ch.batches:
+			if key >> 16 and (key & 0xFFFF) < len(mat_recs) and mat_recs[key & 0xFFFF][4] >> 8:
+				env_pairs.add(((mat_recs[key & 0xFFFF][4] >> 8) - 1, nearest_axis(oct12_decode((key >> 16) & 0xFFF))))
+				n_env_batches += 1
+	(out_dir / "envpairs.json").write_text(json.dumps(sorted(env_pairs)) + "\n")
+	print(f"  reflective batches={n_env_batches} of {sum(len(c.batches) for c in chunks.values())} cubemap views={len(env_pairs)}")
 	mats_blob = b"".join(struct.pack(">IIBBH", h, h2, tid, fl, st) for h, h2, tid, fl, st in mat_recs)
 	body = bytearray(64)
 	# 3D skybox (Source sky_camera): 32-byte block right after the header,

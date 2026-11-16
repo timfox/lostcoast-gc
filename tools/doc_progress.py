@@ -32,8 +32,9 @@ def main() -> int:
 	ap.add_argument("--note", default="")
 	args = ap.parse_args()
 	frames = sorted(
-		glob.glob(str(args.probe / "framedump_*.tga")),
-		key=lambda f: int(f.rsplit("_", 1)[-1][:-4]),
+		glob.glob(str(args.probe / "framedump_*.tga"))
+		+ glob.glob(str(args.probe / "framedump_*.png")),
+		key=lambda f: int(Path(f).stem.rsplit("_", 1)[-1]),
 	)
 	if not frames:
 		print("no framedumps in", args.probe, file=sys.stderr)
@@ -55,12 +56,17 @@ def main() -> int:
 	shutil.copyfile(args.probe / "compare-vs-retail.jpg", shots / f"{args.label}-vs-retail.jpg")
 	clip = ""
 	if shutil.which("ffmpeg") and len(frames) > 1:
+		concat = args.probe / ".frames.ffconcat"
+		concat.write_text(
+			"ffconcat version 1.0\n"
+			+ "".join(f"file '{Path(f).resolve()}'\n" for f in frames)
+		)
 		out = vids / f"{args.label}.mp4"
-		pattern = str(args.probe / "framedump_%d.tga")
 		rc = subprocess.run(
-			["ffmpeg", "-y", "-loglevel", "error", "-framerate", "4", "-start_number", "1",
-			 "-i", pattern, "-pix_fmt", "yuv420p", "-vf", "scale=640:-2", str(out)],
+			["ffmpeg", "-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", str(concat),
+			 "-pix_fmt", "yuv420p", "-vf", "fps=4,scale=640:-2", str(out)],
 		).returncode
+		concat.unlink(missing_ok=True)
 		if rc == 0:
 			# screenshots/ and videos/ are gitignored: keep a tracked copy in the probe dir.
 			shutil.copyfile(out, args.probe / "clip.mp4")

@@ -87,6 +87,19 @@ def _mdl_mesh_vertex_offsets(mdl: bytes) -> list[int]:
 	return offsets
 
 
+def _strip_triangles(indices: list[int], flags: int) -> list[tuple[int, int, int]]:
+	"""Decode a single VTX strip without joining it to neighboring strips."""
+	if flags & 1:
+		if len(indices) % 3:
+			raise ValueError("VTX triangle-list strip has an incomplete triangle")
+		return [tuple(indices[i:i + 3]) for i in range(0, len(indices), 3)]
+	if flags & 2:
+		return [(indices[i + 1], indices[i], indices[i + 2]) if i & 1
+			else (indices[i], indices[i + 1], indices[i + 2])
+			for i in range(len(indices) - 2)]
+	raise ValueError(f"unsupported VTX strip flags: {flags:#x}")
+
+
 def load_source_mesh(mdl: bytes, vvd: bytes, vtx: bytes, lod: int = 2) -> SourceMesh:
 	"""Return triangle mesh for the requested LOD (clamped to available)."""
 	if vvd[:4] != b"IDSV":
@@ -119,7 +132,7 @@ def load_source_mesh(mdl: bytes, vvd: bytes, vtx: bytes, lod: int = 2) -> Source
 	mesh_voff = _mdl_mesh_vertex_offsets(mdl)
 
 	orig_ids: list[int] = []
-	indices: list[int] = []
+	indexed_tris: list[tuple[int, int, int]] = []
 	index_mat: list[int] = []
 
 	for bp in range(num_body_parts):
@@ -142,8 +155,8 @@ def load_source_mesh(mdl: bytes, vvd: bytes, vtx: bytes, lod: int = 2) -> Source
 						vert_offset,
 						num_indices,
 						index_offset,
-						_num_strips,
-						_strip_offset,
+						num_strips,
+						strip_offset,
 						_sgflags,
 					) = struct.unpack_from("<iiiiiiB", vtx, sgh)
 					base = len(orig_ids)
@@ -160,13 +173,20 @@ def load_source_mesh(mdl: bytes, vvd: bytes, vtx: bytes, lod: int = 2) -> Source
 					if not ok:
 						del orig_ids[base:]
 						continue
-					for ii in range(num_indices):
-						local = struct.unpack_from("<H", vtx, sgh + index_offset + ii * 2)[0]
-						indices.append(base + local)
-						index_mat.append(mesh_i)
+					group_indices = struct.unpack_from(f"<{num_indices}H", vtx, sgh + index_offset)
+					for si in range(num_strips):
+						sh = sgh + strip_offset + si * 27
+						n, first, _nv, _firstv, _bones, flags, _changes, _changes_off = struct.unpack_from("<iiiihBii", vtx, sh)
+						if n < 0 or first < 0 or first + n > num_indices:
+							raise ValueError("VTX strip index range exceeds its group")
+						for triangle in _strip_triangles(group_indices[first:first + n], flags):
+							if any(index >= num_verts for index in triangle):
+								raise ValueError("VTX strip references a vertex outside its group")
+							indexed_tris.append(tuple(base + index for index in triangle))
+							index_mat.append(mesh_i)
 
 	# Remap unique VVD verts used by this LOD into a compact array.
-	used = sorted(set(orig_ids[i] for i in indices))
+	used = sorted({orig_ids[i] for tri in indexed_tris for i in tri})
 	remap = {vid: i for i, vid in enumerate(used)}
 	positions: list[tuple[float, float, float]] = []
 	uvs: list[tuple[float, float]] = []
@@ -177,13 +197,12 @@ def load_source_mesh(mdl: bytes, vvd: bytes, vtx: bytes, lod: int = 2) -> Source
 
 	tris: list[tuple[int, int, int]] = []
 	tri_mat: list[int] = []
-	for i in range(0, len(indices) - 2, 3):
-		a, b, c = indices[i : i + 3]
+	for i, (a, b, c) in enumerate(indexed_tris):
 		ia, ib, ic = remap[orig_ids[a]], remap[orig_ids[b]], remap[orig_ids[c]]
 		if ia == ib or ib == ic or ia == ic:
 			continue
 		tris.append((ia, ib, ic))
-		tri_mat.append(index_mat[i] if i < len(index_mat) else 0)
+		tri_mat.append(index_mat[i])
 
 	return SourceMesh(positions=positions, uvs=uvs, tris=tris, tri_mat=tri_mat)
 

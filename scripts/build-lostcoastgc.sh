@@ -112,8 +112,9 @@ if (( DOL_ONLY )); then
 	exit 0
 fi
 
-# Prefer the tip engine DOL when out/ is stale or wrong-gamedir.
-if [[ -f "$ENGINE_DOL" ]] && strings "$ENGINE_DOL" | grep 'Need sd:/xash3d/lostcoast' >/dev/null; then
+# Keep the requested DOL intact, especially for reproducible --iso-only
+# captures. Fall back to the engine artifact only when no DOL exists yet.
+if [[ ! -f "$LCGC_DOL" && -f "$ENGINE_DOL" ]] && strings "$ENGINE_DOL" | grep 'Need sd:/xash3d/lostcoast' >/dev/null; then
 	mkdir -p "$LCGC_OUT"
 	cp -f "$ENGINE_DOL" "$LCGC_DOL"
 fi
@@ -217,9 +218,11 @@ with zipfile.ZipFile(extras, "a", compression=zipfile.ZIP_STORED) as z:
 PY
 }
 inject_357 "$NEST/lostcoast/extras.pk3"
-# Path the retail disc builder prefers over nest extras:
-inject_357 "/run/media/tim/Expansion1/xash3d-gc/OUT/valve/extras.pk3"
-inject_357 "$LCGC_ENGINE/../OUT/valve/extras.pk3"
+# Optional external extras must be selected explicitly; packaging Lost Coast
+# must not alter a shared engine's game assets.
+if [[ -n "${LCGC_EXTRA_PK3:-}" ]]; then
+	inject_357 "$LCGC_EXTRA_PK3"
+fi
 if [[ -n "$VM_MDL" && ! -f "$NEST/lostcoast/viewmodel.pk3" ]]; then
 	vm_tmp="$(mktemp -d)"
 	mkdir -p "$vm_tmp/gc_studio" "$vm_tmp/models"
@@ -230,6 +233,20 @@ if [[ -n "$VM_MDL" && ! -f "$NEST/lostcoast/viewmodel.pk3" ]]; then
 	echo "  + nest viewmodel.pk3 (sidecar; extras is the Flipper path)"
 fi
 rm -rf "$NEST/lostcoast/models"
+# Characters as studio models (bake_lostcoast_studio.py), loose on the disc
+# like media/: models/lc/*.mdl, spawned as cycler entities by the stub BSP.
+if [[ -d "$LCGC_CACHE/bake/studio/models/lc" ]]; then
+	mkdir -p "$NEST/lostcoast/models/lc"
+	cp -f "$LCGC_CACHE/bake/studio/models/lc/"*.mdl "$NEST/lostcoast/models/lc/"
+	# Flipper reads studio files from the gc_studio/<name>.mdl mirror into
+	# the studio arena (model.c Mod_GCLoadStudioFile), as DoD's do.
+	mkdir -p "$NEST/lostcoast/gc_studio"
+	cp -f "$LCGC_CACHE/bake/studio/models/lc/"*.mdl "$NEST/lostcoast/gc_studio/"
+	# Flipper-skinned characters: display lists + lighting (r_gx_actor.c).
+	rm -f "$NEST/lostcoast/gc_studio/"*.gca
+	cp -f "$LCGC_CACHE/bake/studio/models/lc/"*.gca "$NEST/lostcoast/gc_studio/" 2>/dev/null || true
+	echo "  + studio NPC models: $(ls "$NEST/lostcoast/models/lc" | tr '\n' ' ')"
+fi
 # Ensure title bake lands in the nest even if stage was reused without it.
 TITLE_MENU="${LCGC_CACHE}/title/gc_menu"
 if [[ ! -f "$TITLE_MENU/background.tga" ]]; then

@@ -51,6 +51,18 @@ python3 "$LCGC_ROOT/tools/bake_lostcoast_water.py" \
 	--hl2 "$LCGC_CONTENT_HL2" \
 	--out "$BAKE"
 
+echo "==> [lostcoast-gc] baking characters → engine studio models (shared r_studio.c path)"
+if [[ "${LCGC_STUDIO_NPCS:-1}" == "1" ]]; then
+	python3 "$LCGC_ROOT/tools/bake_lostcoast_studio.py" \
+		--lostcoast "$LCGC_CONTENT_LOSTCOAST" \
+		--hl2 "$LCGC_CONTENT_HL2" \
+		--out "$BAKE/studio" \
+		--map "$LCGC_CONTENT_LOSTCOAST/maps/${MAP}.bsp" \
+		--stub-bsp "$BAKE/maps/${MAP}.bsp"
+else
+	rm -rf "$BAKE/studio"
+fi
+
 echo "==> [lostcoast-gc] baking Source props → GX prop pack + mip chains"
 python3 "$LCGC_ROOT/tools/bake_lostcoast_props.py" \
 	--map "$LCGC_CONTENT_LOSTCOAST/maps/${MAP}.bsp" \

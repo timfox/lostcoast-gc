@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import itertools
 import math
 import re
 import struct
@@ -472,7 +473,231 @@ def write_capfaces(path: Path, eyes: list[dict], faces_out: list[dict], atlas: b
 	return {"faces": len(faces_out), "eyes": len(eyes), "bytes": len(buf)}
 
 
-def write_stub_bsp29(path: Path, tex_names: list[str], eye: dict, sky: str) -> None:
+def source_player_clipnodes(data: bytes, bsp: dict) -> tuple[list[tuple], list[tuple[int, int, int]], int]:
+	"""Build one standing-player clip hull from Source's convex collision brushes.
+
+	Each convex brush is a short plane chain. A failed half-space goes to the
+	next brush; passing every side reaches CONTENTS_SOLID. This encodes the
+	union of Source brushes directly as a BSP clipnode DAG, without a CSG pass.
+	"""
+	plane_blob = source_lump(data, 1)
+	planes = []
+	for off in range(0, len(plane_blob), 20):
+		nx, ny, nz, dist, kind = struct.unpack_from("<ffffi", plane_blob, off)
+		planes.append(((nx, ny, nz), dist, kind))
+
+	side_blob = source_lump(data, 19)
+	if len(side_blob) % 8:
+		raise ValueError("VBSP brushside lump has a partial record")
+	sides = [struct.unpack_from("<H", side_blob, off)[0] for off in range(0, len(side_blob), 8)]
+	brush_blob = source_lump(data, 18)
+	if len(brush_blob) % 12:
+		raise ValueError("VBSP brush lump has a partial record")
+
+	# The GameCube boot profile uses the standard HL player box. Source bevel
+	# sides are omitted; expanded face planes remain conservative at corners.
+	hull_mins = (-16.0, -16.0, -36.0)
+	hull_maxs = (16.0, 16.0, 36.0)
+	contents_mask = 0x1 | 0x10000 | 0x20000  # SOLID, PLAYERCLIP, MONSTERCLIP
+	brushes = []
+	used_planes = set()
+	def cross(a, b):
+		return (a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0])
+	def dot(a, b):
+		return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+	def bounds_for(plane_ids):
+		valid = [(planes[i][0], planes[i][1]) for i in plane_ids]
+		lo = [math.inf, math.inf, math.inf]
+		hi = [-math.inf, -math.inf, -math.inf]
+		vertices = 0
+		for (n1, d1), (n2, d2), (n3, d3) in itertools.combinations(valid, 3):
+			c23, c31, c12 = cross(n2, n3), cross(n3, n1), cross(n1, n2)
+			den = dot(n1, c23)
+			if abs(den) < 1.0e-7:
+				continue
+			p = tuple((d1 * c23[k] + d2 * c31[k] + d3 * c12[k]) / den for k in range(3))
+			if any(dot(n, p) > d + 0.05 for n, d in valid):
+				continue
+			vertices += 1
+			for k in range(3):
+				lo[k] = min(lo[k], p[k])
+				hi[k] = max(hi[k], p[k])
+		if vertices < 4 or not all(math.isfinite(v) for v in (*lo, *hi)):
+			return None
+		# Inflate brush bounds by the player hull. Spatial split planes may then
+		# safely skip a subtree only when the swept player origin cannot touch it.
+		return (
+			tuple(lo[k] - hull_maxs[k] for k in range(3)),
+			tuple(hi[k] - hull_mins[k] for k in range(3)),
+		)
+
+	for off in range(0, len(brush_blob), 12):
+		first, count, contents = struct.unpack_from("<iii", brush_blob, off)
+		if not (contents & contents_mask):
+			continue
+		if first < 0 or count < 4 or first + count > len(sides):
+			continue
+		brush_planes = []
+		for side_index in range(first, first + count):
+			plane_index, _texinfo, _dispinfo, bevel, _thin = struct.unpack_from(
+				"<HhhBB", side_blob, side_index * 8,
+			)
+			if bevel or plane_index >= len(planes):
+				continue
+			if plane_index not in brush_planes:
+				brush_planes.append(plane_index)
+		if len(brush_planes) < 4:
+			continue
+		bounds = bounds_for(brush_planes)
+		if bounds is None:
+			continue
+		brushes.append((brush_planes, bounds[0], bounds[1]))
+		used_planes.update(brush_planes)
+
+	# Source displacements are not dbrush records. Approximate each terrain patch
+	# with one plane prism from its four corner samples; this keeps the coast
+	# traversable while holding the whole hull under BSP29's node cap.
+	from source_disp import parse_dispinfos, tessellate_disp  # noqa: PLC0415
+
+	for disp in parse_dispinfos(data):
+		face_index = disp["map_face"]
+		if not (0 <= face_index < len(bsp["faces"])):
+			continue
+		face = bsp["faces"][face_index]
+		if face["texinfo"] < 0 or face["texinfo"] >= len(bsp["texinfos"]):
+			continue
+		texdata = bsp["texinfos"][face["texinfo"]]["texdata"]
+		if texdata < 0 or texdata >= len(bsp["tex_names"]):
+			continue
+		material = bsp["tex_names"][texdata]
+		if material.startswith("tools/") or "water" in material.rsplit("/", 1)[-1]:
+			continue
+		face_points = face_verts(bsp, face)
+		quads = tessellate_disp(data, disp, face_points, max_power=0)
+		if len(quads) != 1:
+			continue
+		pts = quads[0]
+		e0 = tuple(pts[1][k] - pts[0][k] for k in range(3))
+		e1 = tuple(pts[2][k] - pts[0][k] for k in range(3))
+		normal = cross(e0, e1)
+		length = math.sqrt(dot(normal, normal))
+		if length < 1.0e-5:
+			continue
+		normal = tuple(v / length for v in normal)
+		if normal[2] < 0.0:
+			normal = tuple(-v for v in normal)
+		top_dist = max(dot(normal, point) for point in pts)
+		bottom_z = min(point[2] for point in pts) - 512.0
+		prism_planes = [(normal, top_dist, 3), ((0.0, 0.0, -1.0), -bottom_z, 2)]
+		center = tuple(sum(point[k] for point in pts) * 0.25 for k in range(3))
+		for edge_index in range(4):
+			p0 = pts[edge_index]
+			p1 = pts[(edge_index + 1) % 4]
+			edge = tuple(p1[k] - p0[k] for k in range(3))
+			down = (0.0, 0.0, bottom_z - p0[2])
+			side_normal = cross(edge, down)
+			side_length = math.sqrt(dot(side_normal, side_normal))
+			if side_length < 1.0e-5:
+				continue
+			side_normal = tuple(v / side_length for v in side_normal)
+			side_dist = dot(side_normal, p0)
+			if dot(side_normal, center) > side_dist:
+				side_normal = tuple(-v for v in side_normal)
+				side_dist = -side_dist
+			prism_planes.append((side_normal, side_dist, 3))
+		if len(prism_planes) != 6:
+			continue
+		first_plane = len(planes)
+		planes.extend(prism_planes)
+		patch_plane_ids = list(range(first_plane, first_plane + len(prism_planes)))
+		bounds = bounds_for(patch_plane_ids)
+		if bounds is None:
+			continue
+		brushes.append((patch_plane_ids, bounds[0], bounds[1]))
+		used_planes.update(patch_plane_ids)
+
+	if not brushes:
+		raise ValueError("VBSP has no usable solid brush sides")
+	plane_remap = {old: new + 6 for new, old in enumerate(sorted(used_planes))}
+	clip_planes = []
+	for old in sorted(used_planes):
+		normal, dist, _kind = planes[old]
+		support = sum(normal[axis] * (hull_maxs[axis] if normal[axis] >= 0.0 else hull_mins[axis]) for axis in range(3))
+		clip_planes.append((normal, dist + support, 3))
+
+	clipnodes: list[tuple[int, int, int]] = []
+	def append_node(plane: int, front: int, back: int) -> int:
+		if len(clipnodes) >= 32767:
+			raise ValueError("standing collision hull exceeds BSP29 signed clipnode limit")
+		idx = len(clipnodes)
+		clipnodes.append((plane, front, back))
+		return idx
+
+	def build_union(items) -> int:
+		if not items:
+			return -1  # CONTENTS_EMPTY
+		left, right, local, split = [], [], [], None
+		best_score = 0
+		for axis in range(3):
+			centers = sorted((item[1][axis] + item[2][axis]) * 0.5 for item in items)
+			candidate = centers[len(centers) // 2]
+			lset = [item for item in items if item[2][axis] < candidate]
+			rset = [item for item in items if item[1][axis] > candidate]
+			lset_ids = {id(item) for item in lset}
+			rset_ids = {id(item) for item in rset}
+			mset = [item for item in items if id(item) not in lset_ids and id(item) not in rset_ids]
+			score = len(lset) + len(rset) - len(mset)
+			if lset and rset and score > best_score:
+				left, right, local, split = lset, rset, mset, (axis, candidate)
+		if split is None:
+			local = items
+			next_node = -1
+		else:
+			axis, distance = split
+			left_root = build_union(left)
+			right_root = build_union(right)
+			normal = [0.0, 0.0, 0.0]
+			normal[axis] = 1.0
+			# clip_planes is the serialized Source plane list. Spatial split planes
+			# follow it and are axis-aligned in BSP29 plane order.
+			clip_planes.append((tuple(normal), distance, axis))
+			partition_plane = 6 + len(clip_planes) - 1
+			next_node = append_node(partition_plane, right_root, left_root)
+		for brush_planes, _mins, _maxs in reversed(local):
+			inside = -2  # CONTENTS_SOLID
+			for plane_index in reversed(brush_planes):
+				inside = append_node(plane_remap[plane_index], next_node, inside)
+			next_node = inside
+		return next_node
+
+	next_brush = build_union(brushes)
+	if len(clipnodes) > 32767:
+		raise ValueError("standing collision hull exceeds BSP29 signed clipnode limit")
+	# GoldSrc hulls use firstclipnode as a lower bound for every traversal,
+	# which Mod_SetupHull sets to the model's headnode. Reindex reachable nodes
+	# root-first so the whole graph remains in [firstclipnode, lastclipnode].
+	order = []
+	remap = {}
+	stack = [next_brush]
+	while stack:
+		old = stack.pop()
+		if old < 0 or old in remap:
+			continue
+		remap[old] = len(order)
+		order.append(old)
+		_front, back = clipnodes[old][1:]
+		stack.extend((back, _front))
+	clipnodes = [
+		(plane, remap.get(front, front), remap.get(back, back))
+		for old in order
+			for plane, front, back in (clipnodes[old],)
+	]
+	next_brush = 0 if order else -1
+	print(f"  Source collision hull: brushes={len(brushes)} planes={len(clip_planes)} clipnodes={len(clipnodes)}")
+	return clip_planes, clipnodes, next_brush
+
+
+def write_stub_bsp29(path: Path, tex_names: list[str], eye: dict, sky: str, source_bsp: dict | None = None) -> None:
 	"""Minimal GoldSrc BSP29 so -gcmap can mount WT/CapFaces packs by map name."""
 	ox, oy, oz = eye["origin"]
 	ax, ay, az = eye["angles"]
@@ -545,6 +770,12 @@ def write_stub_bsp29(path: Path, tex_names: list[str], eye: dict, sky: str) -> N
 	for i in range(len(names)):
 		texinfo += struct.pack("<8fii", 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, i, 0)
 
+	if source_bsp is not None:
+		clip_planes, clipnodes, clip_root = source_player_clipnodes(source_bsp["data"], source_bsp)
+		planes.extend(clip_planes)
+	else:
+		clipnodes = [(0, -1, -2)]
+		clip_root = 0
 	planes_b = b"".join(struct.pack("<ffffi", n[0], n[1], n[2], dist, typ) for n, dist, typ in planes)
 	verts_b = b"".join(struct.pack("<fff", *v) for v in verts)
 	edges_b = b"".join(struct.pack("<hh", a, c) for a, c in edges)
@@ -580,14 +811,14 @@ def write_stub_bsp29(path: Path, tex_names: list[str], eye: dict, sky: str) -> N
 		0.0,
 		0.0,
 		0,
-		0,
-		0,
-		0,
+		clip_root,
+		clip_root,
+		clip_root,
 		1,
 		0,
 		1,
 	)
-	clipnodes = struct.pack("<ihh", 0, -1, -2)
+	clipnodes_b = b"".join(struct.pack("<ihh", *node) for node in clipnodes)
 
 	lumps = [
 		ents,
@@ -599,7 +830,7 @@ def write_stub_bsp29(path: Path, tex_names: list[str], eye: dict, sky: str) -> N
 		bytes(texinfo),
 		faces_b,
 		b"",
-		clipnodes,
+		clipnodes_b,
 		leaf0 + leaf1,
 		marksurfaces,
 		edges_b,
@@ -1478,6 +1709,20 @@ def bake(
 	if envmap_mats:
 		print(f"  CapFaces envmap/specular mats: {len(envmap_mats)}")
 
+	# infodecal atlas (tools/bake_infodecals.py): all decals share one pack entry
+	# (the pack is at its slot budget). Placement lives in infodecals.json.
+	import bake_infodecals
+	decal_short = None
+	_dec = bake_infodecals.build(Path(map_bsp).read_bytes(), vpks, read_first) if full_geo else None
+	if _dec:
+		_dinfo, _datlas = _dec
+		decal_short = "zdecalatlas"
+		rgba_cache[decal_short] = (_datlas.tobytes(), bake_infodecals.ATLAS, bake_infodecals.ATLAS)
+		short_for_mat[bake_infodecals.ATLAS_NAME] = decal_short
+		needed_mats.add(bake_infodecals.ATLAS_NAME)
+		tevmat_feats[material_canonical(bake_infodecals.ATLAS_NAME)] = {"flags": bake_tevmat.F_ALPHATEST, "alpharef": 96}
+		bake_infodecals.write_info(out_dir, _dinfo)
+		print(f"  infodecals: {len(_dinfo['decals'])} decals, {len(_dinfo['tiles'])} textures in one {bake_infodecals.ATLAS}x{bake_infodecals.ATLAS} atlas")
 	# Encode WT pack — full-geo uses 128² CMPR chains in the GCT.
 	# MEM1 only keeps low mips / 8×8 stubs; R_GXHotService streams full
 	# chains from ARAM after CapFaces boot (sky 6×128 CMPR still fits tip).
@@ -1519,6 +1764,8 @@ def bake(
 		and tevmat_feats.get(material_canonical(m), {}).get("flags", 0)
 		& bake_tevmat.F_ALPHATEST
 	}
+	if decal_short:
+		alphatest_shorts.add(decal_short)
 	for short, (rgba, w, h) in sorted(rgba_cache.items()):
 		alpha = short in alphatest_shorts
 		# Sand and blend layers are the surfaces the eye lingers on: 256² (ARAM
@@ -1533,6 +1780,9 @@ def bake(
 	gct_path = media / f"wt_{stem}.gct"
 	write_gcwt(gct_path, wt_entries)
 	bake_tevmat.write_table(media / "tevmat.gcm", tevmat_blob)
+	(out_dir / "envmask-names.json").write_text(
+		__import__("json").dumps(bake_tevmat.LAST_ENVMASKS, indent=1) + "\n"
+	)
 	# Material → TEV id map for the world display-list bake (bake_worlddl.py).
 	(out_dir / "tevmat-ids.json").write_text(
 		__import__("json").dumps(tevmat_ids, indent=1, sort_keys=True) + "\n"
@@ -1587,7 +1837,9 @@ def bake(
 
 	# Stub BSP for loader
 	maps_dir = out_dir / "maps"
-	write_stub_bsp29(maps_dir / f"{stem}.bsp", sorted(rgba_cache.keys()), eyes[0], bsp["sky"])
+	write_stub_bsp29(
+		maps_dir / f"{stem}.bsp", sorted(rgba_cache.keys()), eyes[0], bsp["sky"], bsp,
+	)
 	print(f"  wrote stub BSP {maps_dir / (stem + '.bsp')}")
 
 	# Name map for debugging

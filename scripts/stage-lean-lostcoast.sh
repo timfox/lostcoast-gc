@@ -116,6 +116,22 @@ if [[ ! -f "$BAKE/media/ss_${MAP}.gcs" || "$SCRIPT_DIR/../tools/bake_lostcoast_s
 		--lostcoast "$LCGC_CONTENT_LOSTCOAST" --hl2 "${LCGC_CONTENT_HL2:-$LCGC_ROOT/content/hl2}" \
 		--out "$BAKE/media" || true
 fi
+# Env cubemaps and $envmaptint palette for the reflection pass.
+# Cubemap views for the reflective batches bake_worlddl.py found.
+if [[ -f "$BAKE/envpairs.json" && ( ! -f "$BAKE/media/cm_${MAP}.gcm" || "$BAKE/envpairs.json" -nt "$BAKE/media/cm_${MAP}.gcm" \
+	|| "$SCRIPT_DIR/../tools/bake_lostcoast_cubemaps.py" -nt "$BAKE/media/cm_${MAP}.gcm" ) ]]; then
+	python3 "$SCRIPT_DIR/../tools/bake_lostcoast_cubemaps.py" \
+		--map "$LCGC_CONTENT_LOSTCOAST/maps/${MAP}.bsp" --out "$BAKE/media" || true
+fi
+if [[ -f "$BAKE/envmask-names.json" && ( ! -f "$BAKE/media/en_${MAP}.bin" || "$BAKE/envmask-names.json" -nt "$BAKE/media/en_${MAP}.bin" ) ]]; then
+	python3 "$SCRIPT_DIR/../tools/bake_lostcoast_envnormals.py" --map "$MAP" --out "$BAKE" || true
+fi
+for f in "cm_${MAP}.gcm" "et_${MAP}.bin" "en_${MAP}.bin"; do
+	if [[ -f "$BAKE/media/$f" ]]; then
+		cp -a "$BAKE/media/$f" "$STAGE/media/"
+		echo "  + $f"
+	fi
+done
 if [[ -f "$BAKE/media/ss_${MAP}.gcs" ]]; then
 	cp -a "$BAKE/media/ss_${MAP}.gcs" "$STAGE/media/"
 	echo "  + soundscape pack ss_${MAP}.gcs"

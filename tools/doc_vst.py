@@ -35,8 +35,9 @@ def main() -> int:
 	ap.add_argument("--fps", type=int, default=8)
 	args = ap.parse_args()
 	frames = sorted(
-		glob.glob(str(args.frames / "framedump_*.tga")),
-		key=lambda f: int(f.rsplit("_", 1)[-1][:-4]),
+		glob.glob(str(args.frames / "framedump_*.tga"))
+		+ glob.glob(str(args.frames / "framedump_*.png")),
+		key=lambda f: int(Path(f).stem.rsplit("_", 1)[-1]),
 	)
 	if not frames:
 		print("no framedumps in", args.frames, file=sys.stderr)
@@ -87,12 +88,21 @@ def main() -> int:
 
 	clip = ""
 	if shutil.which("ffmpeg") and len(frames) > 1:
+		concat = args.probe / ".frames.ffconcat"
+		concat.write_text(
+			"ffconcat version 1.0\n"
+			+ "".join(
+				f"file '{Path(f).resolve()}'\nduration {1 / args.fps:.9f}\n"
+				for f in frames
+			)
+			+ f"file '{Path(frames[-1]).resolve()}'\n"
+		)
 		rc = subprocess.run(
-			["ffmpeg", "-y", "-loglevel", "error", "-framerate", str(args.fps), "-start_number", "1",
-			 "-i", str(args.frames / "framedump_%d.tga"), "-frames:v", str(len(frames)),
-			 "-pix_fmt", "yuv420p",
-			 "-vf", "scale=640:-2", str(args.probe / "vst.mp4")],
+			["ffmpeg", "-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", str(concat),
+			 "-frames:v", str(len(frames)), "-pix_fmt", "yuv420p",
+			 "-vf", f"fps={args.fps},scale=640:-2", str(args.probe / "vst.mp4")],
 		).returncode
+		concat.unlink(missing_ok=True)
 		if rc == 0:
 			clip = f"notes/{args.probe.name}/vst.mp4"
 	shots = ROOT / "playtests/screenshots"

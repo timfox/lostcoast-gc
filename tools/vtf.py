@@ -44,7 +44,7 @@ class VTFImage:
 	rgba: bytes  # w*h*4
 
 
-def _decode_dxt1_block(block: bytes, out: bytearray, x: int, y: int, w: int, h: int, one_bit_alpha: bool = False) -> None:
+def _decode_dxt1_block(block: bytes, out: bytearray, x: int, y: int, w: int, h: int, one_bit_alpha: bool = False, force_four_colors: bool = False) -> None:
 	c0, c1 = struct.unpack_from("<HH", block, 0)
 	bits = struct.unpack_from("<I", block, 4)[0]
 
@@ -56,7 +56,7 @@ def _decode_dxt1_block(block: bytes, out: bytearray, x: int, y: int, w: int, h: 
 
 	p0 = rgb565(c0)
 	p1 = rgb565(c1)
-	if c0 > c1:
+	if c0 > c1 or force_four_colors:
 		palette = [
 			p0,
 			p1,
@@ -96,7 +96,9 @@ def _decode_dxt5_block(block: bytes, out: bytearray, x: int, y: int, w: int, h: 
 		apal = [a0, a1, (4 * a0 + a1) // 5, (3 * a0 + 2 * a1) // 5, (2 * a0 + 3 * a1) // 5, (a0 + 4 * a1) // 5, 0, 255]
 	# color
 	tmp = bytearray(16 * 4)
-	_decode_dxt1_block(block[8:16], tmp, 0, 0, 4, 4)
+	# BC3/DXT5 always has four interpolated RGB colors; its separate alpha
+	# block controls transparency even when the RGB endpoints are reversed.
+	_decode_dxt1_block(block[8:16], tmp, 0, 0, 4, 4, force_four_colors=True)
 	for row in range(4):
 		for col in range(4):
 			px = x + col
@@ -125,8 +127,8 @@ def _decode_dxt(data: bytes, w: int, h: int, fmt: str) -> bytes:
 			if fmt in ("DXT1", "DXT1_ONEBITALPHA"):
 				_decode_dxt1_block(block, out, bx * 4, by * 4, w, h, one_bit_alpha=(fmt == "DXT1_ONEBITALPHA"))
 			elif fmt == "DXT3":
-				# skip explicit alpha (8 bytes) — treat as opaque DXT1 colour for smoke
-				_decode_dxt1_block(block[8:16], out, bx * 4, by * 4, w, h)
+				# BC2/DXT3 likewise always uses the four-color RGB palette.
+				_decode_dxt1_block(block[8:16], out, bx * 4, by * 4, w, h, force_four_colors=True)
 				for row in range(4):
 					for col in range(4):
 						px, py = bx * 4 + col, by * 4 + row

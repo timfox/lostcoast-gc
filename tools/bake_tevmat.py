@@ -40,6 +40,7 @@ GC_TEVMAT_MAX_ENVMASK = 8  # shared I4 masks for Source envmap alpha masks
 GC_TEVMAT_DETAIL_SIDE = 64
 GC_TEVMAT_DETAIL_BYTES = 4096 + 1024 + 256 + 64
 GC_TEVMAT_ENVMASK_BYTES = 2048  # 64² GX I4
+LAST_ENVMASKS: list[dict] = []  # filled by build_table, in mask index order
 GC_TEVMAT_ENVMASK_MAGIC = b"GCem"
 
 F_DETAIL = 0x01
@@ -94,6 +95,7 @@ def classify(vmt: dict[str, str] | None) -> dict | None:
 		mask = ""
 		if _num(vmt.get("$normalmapalphaenvmapmask"), 0.0) >= 1.0:
 			mask = (vmt.get("$bumpmap") or "").strip()
+			out["envmask_normal"] = True
 		elif _num(vmt.get("$basealphaenvmapmask"), 0.0) >= 1.0:
 			mask = (vmt.get("$basetexture") or "").strip()
 		if mask:
@@ -172,6 +174,38 @@ def _i4_tiled(lum: list[int], side: int) -> bytes:
 	return bytes(out)
 
 
+def normal_xy_ia8(rgba: bytes, w: int, h: int, side: int = 64) -> bytes:
+	"""Pack a complete tangent-space normal map's X/Y channels as GX IA8.
+
+	Each byte remains centered on 128, so the runtime can use it as a signed
+	indirect-texture offset. The two channels are area filtered together; no
+	crop, repetition, contrast stretch, or alpha-mask conversion is applied.
+	The caller owns the separate Source alpha reflectivity mask.
+	"""
+	if w <= 0 or h <= 0 or side <= 0 or side % 4 or len(rgba) != w * h * 4:
+		raise ValueError("invalid normal-map dimensions or RGBA data")
+	xy = []
+	for y in range(side):
+		sy0, sy1 = y * h // side, max(y * h // side + 1, (y + 1) * h // side)
+		for x in range(side):
+			sx0, sx1 = x * w // side, max(x * w // side + 1, (x + 1) * w // side)
+			r = g = count = 0
+			for sy in range(sy0, sy1):
+				for sx in range(sx0, sx1):
+					o = (sy * w + sx) * 4
+					r += rgba[o]
+					g += rgba[o + 1]
+					count += 1
+			xy.append((round(r / count), round(g / count)))
+	out = bytearray()
+	for ty in range(0, side, 4):
+		for tx in range(0, side, 4):
+			for y in range(4):
+				for x in range(4):
+					out.extend(xy[(ty + y) * side + tx + x])
+	return bytes(out)
+
+
 def _envmask_i4(rgba: bytes, w: int, h: int) -> bytes:
 	"""Bake Source's authored envmap mask to a compact, high-contrast I4 map."""
 	side = GC_TEVMAT_DETAIL_SIDE
@@ -191,9 +225,9 @@ def _envmask_i4(rgba: bytes, w: int, h: int) -> bytes:
 					base += 4
 					n += 1
 			lum.append(int(max(0, min(255, round(acc / max(1, n))))))
-	# The authored mask as it is. The shader squares mask x tint in linear
-	# light; in display gamma that is the mask to the power 2 / 2.2.
-	lum = [int(round(255.0 * (value / 255.0) ** (2.0 / 2.2))) for value in lum]
+	# The authored mask as it is, squared: the shader squares cube x mask x
+	# tint in linear light and the engine keeps that product linear.
+	lum = [int(round(255.0 * (value / 255.0) ** 2.0)) for value in lum]
 	body = _i4_tiled(lum, side)
 	assert len(body) == GC_TEVMAT_ENVMASK_BYTES, len(body)
 	return body
@@ -302,6 +336,7 @@ def build_table(
 
 	envmask_idx: dict[str, int] = {}
 	envmask_blobs: list[bytes] = []
+	del LAST_ENVMASKS[:]
 	for tex, _area in sorted(emask_area.items(), key=lambda kv: (-kv[1], kv[0])):
 		if len(envmask_blobs) >= GC_TEVMAT_MAX_ENVMASK:
 			log.append(f"  tevmat: envmask {tex} dropped (quota {GC_TEVMAT_MAX_ENVMASK})")
@@ -313,6 +348,9 @@ def build_table(
 		rgba, w, h = got
 		envmask_idx[tex] = len(envmask_blobs)
 		envmask_blobs.append(_envmask_i4(rgba, w, h))
+		# Mask order for tools/bake_lostcoast_envnormals.py (envmask-names.json).
+		LAST_ENVMASKS.append({"tex": tex, "normal": any(
+			f.get("envmask") == tex and f.get("envmask_normal") for f in mat_features.values())})
 		log.append(
 			f"  tevmat: envmask[{envmask_idx[tex]}] {tex} {w}x{h} "
 			f"area={emask_area[tex]:.0f}"
