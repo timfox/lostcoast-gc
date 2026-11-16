@@ -188,6 +188,11 @@ if [[ "${LCGC_VST:-0}" == "1" ]]; then
 	# bake a still-eye path when gcvst wins later.
 	sed -i 's/^dumpeye /#dumpeye /' "$NEST/lostcoast/gamecube.cfg"
 	echo "  + gamecube.cfg: gcvst (stress flythrough)"
+	# LCGC_PROFILE=1: host stage profiler (-gcprofile) for frame-time work.
+	if [[ "${LCGC_PROFILE:-0}" == "1" ]]; then
+		echo "profile" >> "$NEST/lostcoast/gamecube.cfg"
+		echo "  + gamecube.cfg: profile"
+	fi
 fi
 # HL1 357: viewmodel.pk3 fails DVD fopen on Flipper (only extras.pk3 mounts).
 # Disc builder also swaps nest extras for valve extras — patch every extras we
