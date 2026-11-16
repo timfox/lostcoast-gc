@@ -148,6 +148,14 @@ if [[ -f "$BAKE/media/fi_${MAP}.gcf" ]]; then
 	cp -a "$BAKE/media/fi_${MAP}.gcf" "$STAGE/media/"
 	echo "  + fires fi_${MAP}.gcf"
 fi
+# The sun on the water: HDR light the 8-bit mirror clips (tools/bake_water_sun.py).
+if [[ ! -f "$BAKE/media/ws_${MAP}.gcx" || "$SCRIPT_DIR/../tools/bake_water_sun.py" -nt "$BAKE/media/ws_${MAP}.gcx" ]]; then
+	python3 "$SCRIPT_DIR/../tools/bake_water_sun.py" --out "$BAKE" || true
+fi
+if [[ -f "$BAKE/media/ws_${MAP}.gcx" ]]; then
+	cp -a "$BAKE/media/ws_${MAP}.gcx" "$STAGE/media/"
+	echo "  + water sun ws_${MAP}.gcx"
+fi
 if [[ -f "$BAKE/media/gw_${MAP}.gcw" ]]; then
 	cp -a "$BAKE/media/gw_${MAP}.gcw" "$STAGE/media/"
 	echo "  + water pack gw_${MAP}.gcw ($(wc -c <"$BAKE/media/gw_${MAP}.gcw") bytes)"
