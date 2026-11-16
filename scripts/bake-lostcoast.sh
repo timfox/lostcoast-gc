@@ -59,6 +59,12 @@ if [[ "${LCGC_STUDIO_NPCS:-1}" == "1" ]]; then
 		--out "$BAKE/studio" \
 		--map "$LCGC_CONTENT_LOSTCOAST/maps/${MAP}.bsp" \
 		--stub-bsp "$BAKE/maps/${MAP}.bsp"
+	# What they do: scenes, node graph, voice (lostcoast_npcs.cpp reads these)
+	python3 "$LCGC_ROOT/tools/bake_lostcoast_actors.py" \
+		--lostcoast "$LCGC_CONTENT_LOSTCOAST" \
+		--hl2 "$LCGC_CONTENT_HL2" \
+		--map "$LCGC_CONTENT_LOSTCOAST/maps/${MAP}.bsp" \
+		--out "$BAKE/studio"
 else
 	rm -rf "$BAKE/studio"
 fi

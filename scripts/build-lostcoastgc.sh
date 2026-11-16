@@ -179,6 +179,13 @@ if [[ -n "${LCGC_DUMP_EYE:-}" ]]; then
 	sed -i "s/^dumpeye .*/dumpeye ${LCGC_DUMP_EYE}/" "$NEST/lostcoast/gamecube.cfg"
 	echo "  + gamecube.cfg: dumpeye ${LCGC_DUMP_EYE}"
 fi
+# LCGC_EXTRA_CFG="word ..." appends lines to the boot file, e.g.
+# lcscenetest (read by lostcoast_npcs.cpp) to start the fisherman's intro
+# scene in a probe with nobody at the controls.
+for w in ${LCGC_EXTRA_CFG:-}; do
+	echo "$w" >> "$NEST/lostcoast/gamecube.cfg"
+	echo "  + gamecube.cfg: $w"
+done
 # LCGC_VST=1: video-stress-test disc — ride the retail ptrack_vst flythrough
 # (whole-map coverage for render parity). Pair with a private LCGC_ISO and
 # XASH3D_GC_ISO_CACHE so the still-eye disc is left alone (scripts/probe-vst.sh).
@@ -250,6 +257,11 @@ if [[ -d "$LCGC_CACHE/bake/studio/models/lc" ]]; then
 	# Flipper-skinned characters: display lists + lighting (r_gx_actor.c).
 	rm -f "$NEST/lostcoast/gc_studio/"*.gca
 	cp -f "$LCGC_CACHE/bake/studio/models/lc/"*.gca "$NEST/lostcoast/gc_studio/" 2>/dev/null || true
+	# What the characters do (bake_lostcoast_actors.py): scene scripts, the
+	# AI node graph and their voice lines.
+	for d in scripts sound; do
+		[[ -d "$LCGC_CACHE/bake/studio/$d" ]] && cp -a "$LCGC_CACHE/bake/studio/$d" "$NEST/lostcoast/"
+	done
 	echo "  + studio NPC models: $(ls "$NEST/lostcoast/models/lc" | tr '\n' ' ')"
 fi
 # Ensure title bake lands in the nest even if stage was reused without it.
