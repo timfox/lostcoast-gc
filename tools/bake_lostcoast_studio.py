@@ -93,6 +93,15 @@ MODELS = {
 # The engine reads studio files into a 512 KB arena (model.c
 # GC_STUDIO_MODEL_SHARE_BYTES) shared with the crowbar and grenade, so the
 # cast has to fit beside them: ~1-2k verts each, near a DoD player model.
+# NPC weapons (additionalequipment) whose world model's root bone is one of
+# the character's own bones: Source bone-merges them, so they bake straight
+# into the character's actor mesh on that bone (one draw, no extra entity).
+EQUIPMENT = {"fisherman": "models/lostcoast/fisherman/harpoon"}
+
+# Characters that look at things through Source's head/spine/body pose params.
+LOOK_MODELS = {"fisherman"}
+LOOK_RANGES: dict[str, str] = {}  # name -> "pose_lo pose_hi deg_lo deg_hi" per controller
+
 DEFAULT_LOD = {"fisherman": 5, "combine_soldier": 3, "combine_super_soldier": 4, "seagull": 1}
 
 MAX_FPS = 15.0  # GC: sample animation at 15 Hz, r_studio interpolates frames
@@ -490,11 +499,15 @@ def placement_light(cube, sun):
 	return faces, tuple(top), _fit_curve(lam), _fit_curve(half)
 
 
-def write_actor(name, mdl, vvd, vtx, bones, mat_flags, out_path: Path, placements):
+def write_actor(name, mdl, vvd, vtx, bones, mat_flags, out_path: Path, placements, extras=()):
 	sw = vtx_switch_points(vtx)
 	lods = []
 	for li, lod in enumerate(ACTOR_LODS[name]):
 		tris, pos, nrm, uv, vb, used = lod_geometry(mdl, vvd, vtx, lod, bones)
+		for etris, epos, enrm, euv, evb in extras:
+			base = len(pos)
+			tris = tris + [(m, a + base, b + base, c + base) for m, a, b, c in etris]
+			pos, nrm, uv, vb = pos + epos, nrm + enrm, uv + euv, vb + evb
 		# Source picks LOD i once the metric passes LOD i's switch point; the
 		# near LOD stands in for every finer one.
 		switch = 0.0 if li == 0 else max(0.0, sw[used] if used < len(sw) else 0.0)
@@ -611,6 +624,61 @@ def write_actor(name, mdl, vvd, vtx, bones, mat_flags, out_path: Path, placement
 	print(f"  {name}.gca: {len(buf) // 1024} KB, {'; '.join(stats)}, {len(placements)} placement(s)")
 
 
+# ---------------------------------------------------------------- look
+
+# Source's look-at pose parameters, in the order they become GoldSrc bone
+# controllers 0..3 (lostcoast_npcs.cpp drives them the way
+# CAI_BaseActor::UpdateHeadControl drives the pose parameters).
+LOOK_POSES = ("head_yaw", "head_pitch", "spine_yaw", "body_yaw")
+STUDIO_XR, STUDIO_YR, STUDIO_ZR = 0x08, 0x10, 0x20
+
+
+def _pose_params(d: bytes) -> list[tuple[str, float, float]]:
+	"""mstudioposeparamdesc_t table (studiohdr numlocalposeparameters @300)."""
+	n, idx = struct.unpack_from("<ii", d, 300)
+	out = []
+	for i in range(max(0, min(n, 32))):
+		o = idx + i * 20
+		nm = _cstr(d, o + struct.unpack_from("<i", d, o)[0])
+		_fl, st, en, _lp = struct.unpack_from("<ifff", d, o + 4)
+		out.append((nm, st, en))
+	return out
+
+
+def look_controllers(anim_mdl: bytes, am, remap, bones) -> list[dict]:
+	"""One bone controller per look pose: the bone and euler axis its delta
+	sequence turns most, with the turn at each end of the pose range."""
+	params = _pose_params(anim_mdl)
+	names = [p[0] for p in params]
+	ctrls = []
+	for pose in LOOK_POSES:
+		if pose not in names:
+			continue
+		pi = names.index(pose)
+		seq = next((q for q in am.seqs if q.paramindex and q.paramindex[0] == pi and len(q.anims) == 3), None)
+		if not seq:
+			continue
+		lo_a, mid_a, hi_a = (am.anims[i] for i in seq.anims)
+		best = None
+		for b, val in lo_a.frames[0].items():
+			mb = remap[b] if 0 <= b < len(remap) else -1
+			if mb < 0 or bones[mb].name.lower().endswith("forward"):
+				continue
+			lo = ss.quat_angles(val[1])
+			hiv = hi_a.frames[0].get(b)
+			hi = ss.quat_angles(hiv[1]) if hiv else tuple(-x for x in lo)
+			for ax in range(3):
+				span = abs(hi[ax] - lo[ax])
+				if best is None or span > best[0]:
+					best = (span, mb, ax, math.degrees(lo[ax]), math.degrees(hi[ax]))
+		if not best or best[0] < math.radians(1.0):
+			continue
+		_span, mb, ax, dlo, dhi = best
+		ctrls.append({"pose": pose, "bone": mb, "axis": ax, "pose_lo": params[pi][1], "pose_hi": params[pi][2],
+			"deg_lo": dlo, "deg_hi": dhi})
+	return ctrls
+
+
 # ---------------------------------------------------------------- writer
 
 def convert(vpks, name: str, lod: int, tex_max: int, out_dir: Path, flip: bool, placements=None) -> Path:
@@ -664,6 +732,18 @@ def convert(vpks, name: str, lod: int, tex_max: int, out_dir: Path, flip: bool, 
 		seq_out.append((label, ACT.get(act, 0) if act else 0, s.flags & ss.STUDIO_LOOPING, fps, frames))
 	if not seq_out:
 		raise SystemExit(f"{name}: no sequences")
+
+	look = []
+	if name in LOOK_MODELS:
+		for asrc, (am_, remap_) in anim_cache.items():
+			look = look_controllers(read_first(vpks, asrc + ".mdl"), am_, remap_, bones)
+			if look:
+				break
+		LOOK_RANGES[name] = " ".join(
+			f"{c['pose_lo']:g} {c['pose_hi']:g} {c['deg_lo']:.2f} {c['deg_hi']:.2f}" for c in look)
+		for k, c in enumerate(look):
+			print(f"  look ctrl {k}: {c['pose']} -> {bones[c['bone']].name} axis {'xyz'[c['axis']]} "
+				f"{c['deg_lo']:.1f}..{c['deg_hi']:.1f} deg over pose {c['pose_lo']:.1f}..{c['pose_hi']:.1f}")
 
 	# root motion: strip net XY travel of the root over locomotion cycles
 	motions = []
@@ -738,6 +818,36 @@ def convert(vpks, name: str, lod: int, tex_max: int, out_dir: Path, flip: bool, 
 	skin_table = list(struct.unpack_from(f"<{nskinref * nfam}h", mdl, skinidx)) if nskinref * nfam else []
 
 	actor = name in ACTOR_LODS
+	extras = []
+	if actor and name in EQUIPMENT:
+		eq = EQUIPMENT[name]
+		emdl, evvd, evtx = (read_first(vpks, eq + x) for x in (".mdl", ".vvd", ".dx90.vtx"))
+		esrc = ss.read_studio(emdl, decode_anims=False)
+		names = {b.name.lower(): i for i, b in enumerate(bones)}
+		bmap = [names.get(b.name.lower(), -1) for b in esrc.bones]
+		if emdl and evvd and evtx and bmap and bmap[0] >= 0:
+			etris, epos, enrm, euv, evb, _ = lod_geometry(emdl, evvd, evtx, 0, esrc.bones)
+			# its skin becomes one more material column of the skin table
+			numtex, texidx = struct.unpack_from("<ii", emdl, 204)
+			ncd_e, cdidx_e = struct.unpack_from("<ii", emdl, 212)
+			ecds = [_cstr(emdl, struct.unpack_from("<i", emdl, cdidx_e + i * 4)[0]).replace("\\", "/") for i in range(ncd_e)]
+			o = texidx
+			etname = _cstr(emdl, o + struct.unpack_from("<i", emdl, o)[0])
+			img, kv, rel = load_skin(vpks, ecds, etname, max_side=max(tex_max, 256))
+			if img is not None:
+				nw, nh = pow2_fit(img.width, img.height, tex_max)
+				rgba = resize_rgba(img.rgba, img.width, img.height, nw, nh)
+				idx, pal = palettise(rgba, nw, nh, False)
+				new_tex = len(textures)
+				textures.append((etname[-63:], 0, nw, nh, idx, pal))
+				tex_halflambert.append(kv.get("$halflambert") == "1")
+				mat = nskinref
+				if skin_table:
+					skin_table = [v for f in range(nfam) for v in skin_table[f * nskinref:(f + 1) * nskinref] + [new_tex]]
+				nskinref += 1
+				extras.append(([(mat, a, b, c) for _m, a, b, c in etris], epos, enrm, euv,
+					[bmap[v] if bmap[v] >= 0 else bmap[0] for v in evb]))
+				print(f"  {name}: {eq} merged on {bones[bmap[0]].name} ({len(etris)} tris, skin {etname})")
 	if actor:
 		mat_flags = {}
 		for m in range(max(1, nskinref)):
@@ -752,7 +862,7 @@ def convert(vpks, name: str, lod: int, tex_max: int, out_dir: Path, flip: bool, 
 			mat_flags[m] = f
 		out_dir.joinpath("models", "lc").mkdir(parents=True, exist_ok=True)
 		write_actor(name, mdl, vvd, vtx, bones, mat_flags,
-			out_dir / "models" / "lc" / f"{name}.gca", placements or [])
+			out_dir / "models" / "lc" / f"{name}.gca", placements or [], extras)
 		# Flipper draws the mesh from the .gca; the MDL keeps the skeleton,
 		# sequences, bounds and skins.
 		tris = []
@@ -803,10 +913,18 @@ def convert(vpks, name: str, lod: int, tex_max: int, out_dir: Path, flip: bool, 
 
 	boneindex = here()
 	for i, b in enumerate(bones):
+		bc = [-1] * 6
+		for k, c in enumerate(look):
+			if c["bone"] == i:
+				bc[3 + c["axis"]] = k
 		buf += struct.pack(
 			"<32sii6i6f6f", b.name.encode("latin-1")[:31], b.parent, 0,
-			*([-1] * 6), *values[i], *scales[i],
+			*bc, *values[i], *scales[i],
 		)
+	bonecontrollerindex = here()
+	for k, c in enumerate(look):
+		buf += struct.pack("<iiffii", c["bone"], (STUDIO_XR, STUDIO_YR, STUDIO_ZR)[c["axis"]],
+			min(c["deg_lo"], c["deg_hi"]), max(c["deg_lo"], c["deg_hi"]), 0, k)
 
 	# hitbox: one box on the root bone so traces have something to hit
 	hitboxindex = here()
@@ -954,7 +1072,7 @@ def convert(vpks, name: str, lod: int, tex_max: int, out_dir: Path, flip: bool, 
 		"<4si64si3f3f3f3f3fi26i",
 		b"IDST", 10, f"lc/{name}.mdl".encode(), len(buf), *eye,
 		*src.hull_min, *src.hull_max, *bbmin, *bbmax, 0,
-		len(bones), boneindex, 0, boneindex, 1, hitboxindex,
+		len(bones), boneindex, len(look), bonecontrollerindex, 1, hitboxindex,
 		len(seq_out), seqindex, 1, seqgroupindex,
 		0, 0, 0, 0, 0, 0,
 		1, bodypartindex, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -1009,6 +1127,66 @@ def _npc_model(e: dict) -> str | None:
 	return None
 
 
+def _brush_bounds(src_bsp: Path, e: dict) -> tuple | None:
+	"""World-space box of a brush entity (*N model bounds + its origin)."""
+	m = e.get("model", "")
+	if not m.startswith("*"):
+		return None
+	d = src_bsp.read_bytes()
+	off, _ln = struct.unpack_from("<ii", d, 8 + 14 * 16)
+	v = struct.unpack_from("<6f", d, off + int(m[1:]) * 48)
+	o = _parse3(e.get("origin", "0 0 0"))
+	return tuple(v[i] + o[i % 3] for i in range(6))
+
+
+def _fisherman_keys(src_bsp: Path, ents: list[dict], by_name: dict, name: str, at) -> dict:
+	"""What the map does with the fisherman at the start of the level.
+
+	The trigger_once nearest to where he stands that starts one of his scenes
+	(lcs_fisherman_intro, on the jetty), the
+	scene itself (baked by bake_lostcoast_actors.py) and the ai_goal_lead its
+	OnCompletion activates: goal marker, LeadDistance, RetrieveDistance.
+	"""
+	keys: dict = {}
+	best = None
+	scenes = {e.get("targetname", "").lower(): e for e in ents
+		if e.get("classname") == "logic_choreographed_scene" and e.get("target1", "").lower() == name}
+	for e in ents:
+		if e.get("classname") != "trigger_once" or e.get("StartDisabled", "0") == "1":
+			continue
+		for _k, v in _outputs(e):
+			parts = [x.strip() for x in v.split(",")]
+			if len(parts) > 1 and parts[1].lower() == "start" and parts[0].lower() in scenes:
+				sc = scenes[parts[0].lower()]
+				bb = _brush_bounds(src_bsp, e)
+				if not bb:
+					continue
+				dist = math.dist(((bb[0] + bb[3]) / 2, (bb[1] + bb[4]) / 2, (bb[2] + bb[5]) / 2), at)
+				if best is not None and dist >= best:
+					continue
+				best = dist
+				keys.clear()
+				keys["lc_trigger"] = " ".join(f"{x:g}" for x in bb)
+				keys["lc_scene"] = "scripts/lc/" + Path(sc["SceneFile"].replace("\\", "/")).stem.lower() + ".txt"
+				for k2, v2 in _outputs(sc):
+					p2 = [x.strip() for x in v2.split(",")]
+					if k2 != "oncompletion" or len(p2) < 2 or p2[1].lower() != "activate":
+						continue
+					for g in by_name.get(p2[0].lower(), []):
+						if g.get("classname") != "ai_goal_lead":
+							continue
+						goal = (by_name.get(g.get("goal", "").lower()) or [None])[0]
+						if goal:
+							o = _parse3(goal.get("origin", "0 0 0"))
+							yaw = _parse3(goal.get("angles", "0 0 0"))[1]
+							keys["lc_lead_goal"] = f"{o[0]:g} {o[1]:g} {o[2]:g} {yaw:g}"
+						keys["lc_lead_dist"] = g.get("LeadDistance", "64")
+						keys["lc_retrieve_dist"] = g.get("RetrieveDistance", "96")
+	keys["lc_nodes"] = f"scripts/lc/{src_bsp.stem.lower()}.lcng"
+	keys["lc_talker"] = "scripts/lc/fisherman_talker.txt"
+	return keys
+
+
 def npc_spawns(src_bsp: Path, have: set[str]) -> list[dict]:
 	"""Where the map puts its characters when the level starts.
 
@@ -1036,6 +1214,7 @@ def npc_spawns(src_bsp: Path, have: set[str]) -> list[dict]:
 		if e.get("targetname"):
 			by_name.setdefault(e["targetname"].lower(), []).append(e)
 	start_targets: list[tuple[str, str]] = []
+	path_starts: list[str] = []
 	todo = [(k, v) for e in ents if e.get("classname") == "logic_auto"
 		for k, v in _outputs(e) if k == "onmapspawn"]
 	seen_relays: set[str] = set()
@@ -1067,8 +1246,12 @@ def npc_spawns(src_bsp: Path, have: set[str]) -> list[dict]:
 				# The NPC drops to the floor on spawn; the template's own
 				# origin is where the mapper stood it on that floor.
 				z = to[2] if math.hypot(mo[0] - to[0], mo[1] - to[1]) < 48 else mo[2]
-				out.append({"model": lc, "origin": f"{mo[0]:g} {mo[1]:g} {z:g}",
-					"angles": mk.get("angles", t.get("angles", "0 0 0")), "seq": "idle"})
+				sp = {"model": lc, "origin": f"{mo[0]:g} {mo[1]:g} {z:g}",
+					"angles": mk.get("angles", t.get("angles", "0 0 0")), "seq": "idle"}
+				if lc == "fisherman":
+					sp["classname"] = "monster_lc_fisherman"
+					sp["keys"] = _fisherman_keys(src_bsp, ents, by_name, tname, (mo[0], mo[1], z))
+				out.append(sp)
 	for e in ents:
 		cls = e.get("classname", "")
 		name = e.get("targetname", "").lower()
@@ -1082,8 +1265,34 @@ def npc_spawns(src_bsp: Path, have: set[str]) -> list[dict]:
 			lc = "combine_super_soldier" if "super" in model else "combine_soldier"
 		elif cls == "npc_seagull":
 			lc = "seagull"
-		if lc and lc in have:
-			out.append({"model": lc, "origin": org, "angles": ang, "seq": seq})
+		if not (lc and lc in have):
+			continue
+		sp = {"model": lc, "origin": org, "angles": ang, "seq": seq}
+		if lc == "seagull":
+			# npc_seagull runs as monster_lc_seagull (lostcoast_npcs.cpp,
+			# Valve's npc_crow flight). When the map fires its FireUser1 at
+			# spawn, its OnUser1 FlyAway,<path_corner> becomes the target.
+			sp["classname"] = "monster_lc_seagull"
+			if (name, "fireuser1") in start_targets:
+				for k, v in _outputs(e):
+					parts = [x.strip() for x in v.split(",")]
+					if k == "onuser1" and len(parts) > 2 and parts[1].lower() == "flyaway" and parts[2]:
+						sp["keys"] = {"target": parts[2]}
+						path_starts.append(parts[2])
+		out.append(sp)
+	# path_corner chains the characters follow, as GoldSrc path_corners
+	seen: set[str] = set()
+	for start in path_starts:
+		c = start
+		while c and c.lower() not in seen:
+			pcs = [p_ for p_ in by_name.get(c.lower(), []) if p_.get("classname") == "path_corner"]
+			if not pcs:
+				break
+			seen.add(c.lower())
+			pc = pcs[0]
+			out.append({"raw": {"classname": "path_corner", "targetname": pc["targetname"],
+				"target": pc.get("target", ""), "origin": pc.get("origin", "0 0 0")}})
+			c = pc.get("target", "")
 	return out
 
 
@@ -1105,9 +1314,16 @@ def patch_stub_bsp(stub: Path, spawns: list[dict]) -> None:
 	# drop entities this tool added before (re-bake is idempotent)
 	import re
 	text = re.sub(r'\{[^{}]*"lc_studio" "1"[^{}]*\}\n?', "", text)
+	nraw = 0
 	for sp in spawns:
+		if "raw" in sp:
+			text += "{\n\"lc_studio\" \"1\"\n" + "".join(
+				f"\"{k}\" \"{v}\"\n" for k, v in sp["raw"].items() if v) + "}\n"
+			nraw += 1
+			continue
 		text += (
-			"{\n\"classname\" \"monster_generic\"\n\"lc_studio\" \"1\"\n"
+			f"{{\n\"classname\" \"{sp.get('classname', 'monster_generic')}\"\n\"lc_studio\" \"1\"\n"
+			+ "".join(f"\"{k}\" \"{v}\"\n" for k, v in sp.get("keys", {}).items()) +
 			f"\"model\" \"models/lc/{sp['model']}.mdl\"\n"
 			f"\"origin\" \"{sp['origin']}\"\n\"angles\" \"{sp['angles']}\"\n"
 			f"\"sequence\" \"{seq_index(sp['model'], sp['seq'])}\"\n"
@@ -1122,7 +1338,7 @@ def patch_stub_bsp(stub: Path, spawns: list[dict]) -> None:
 	d += blob
 	struct.pack_into("<ii", d, 4, new_off, len(blob))
 	stub.write_bytes(bytes(d))
-	print(f"  stub bsp: {len(spawns)} studio NPC monster_generic -> {stub}")
+	print(f"  stub bsp: {len(spawns) - nraw} characters + {nraw} path_corners -> {stub}")
 
 
 def main() -> int:
@@ -1152,13 +1368,17 @@ def main() -> int:
 		places = []
 		if light and name in ACTOR_LODS:
 			for sp in spawns:
-				if sp["model"] != name:
+				if sp.get("model") != name:
 					continue
 				o = tuple(float(x) for x in sp["origin"].split()[:3])
 				cube, sun, sdir = lighting_at(light, o)
 				places.append({"origin": o, "cube": cube, "sun": sun, "sundir": sdir})
 				print(f"  {name} @ {sp['origin']}: sun {'visible' if sun else 'blocked'}")
 		convert(vpks, name, lod, args.tex_max, Path(args.out), args.flip, places)
+		if name in LOOK_RANGES:
+			for sp in spawns:
+				if sp.get("model") == name and "keys" in sp:
+					sp["keys"]["lc_look"] = LOOK_RANGES[name]
 	if args.map and args.stub_bsp:
 		patch_stub_bsp(args.stub_bsp, spawns)
 	return 0
