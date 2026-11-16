@@ -140,6 +140,14 @@ if [[ -f "$BAKE/media/fx_${MAP}.gcf" ]]; then
 	cp -a "$BAKE/media/fx_${MAP}.gcf" "$STAGE/media/"
 	echo "  + smoke emitters fx_${MAP}.gcf"
 fi
+# env_fire flames from the retail particle system (tools/bake_lostcoast_fire.py).
+if [[ ! -f "$BAKE/media/fi_${MAP}.gcf" || "$SCRIPT_DIR/../tools/bake_lostcoast_fire.py" -nt "$BAKE/media/fi_${MAP}.gcf" ]]; then
+	python3 "$SCRIPT_DIR/../tools/bake_lostcoast_fire.py" --out "$BAKE" || true
+fi
+if [[ -f "$BAKE/media/fi_${MAP}.gcf" ]]; then
+	cp -a "$BAKE/media/fi_${MAP}.gcf" "$STAGE/media/"
+	echo "  + fires fi_${MAP}.gcf"
+fi
 if [[ -f "$BAKE/media/gw_${MAP}.gcw" ]]; then
 	cp -a "$BAKE/media/gw_${MAP}.gcw" "$STAGE/media/"
 	echo "  + water pack gw_${MAP}.gcw ($(wc -c <"$BAKE/media/gw_${MAP}.gcw") bytes)"

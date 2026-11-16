@@ -193,6 +193,13 @@ def decode_vtf(data: bytes, max_side: int | None = 256) -> VTFImage:
 	thumb = _mip_size(low_w, low_h, low_fmt) if low_w and low_h else 0
 	# Align: thumbnail starts at header_size
 	pos = header_size + thumb
+	# v7.3+: the resource table says where the image starts. Other resources
+	# (a particle sheet, 0x10) can sit between the thumbnail and the image.
+	if ver_min >= 3:
+		for ri in range(struct.unpack_from("<I", data, 68)[0]):
+			if data[80 + ri * 8:83 + ri * 8] == b"\x30\x00\x00":
+				pos = struct.unpack_from("<I", data, 84 + ri * 8)[0]
+				break
 
 	# Mipmaps are stored smallest → largest
 	mips = []
