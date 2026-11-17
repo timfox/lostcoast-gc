@@ -156,6 +156,14 @@ if [[ -f "$BAKE/media/ws_${MAP}.gcx" ]]; then
 	cp -a "$BAKE/media/ws_${MAP}.gcx" "$STAGE/media/"
 	echo "  + water sun ws_${MAP}.gcx"
 fi
+# The map's auto-exposure limits (tools/bake_lostcoast_tonemap.py).
+if [[ ! -f "$BAKE/media/tm_${MAP}.bin" || "$SCRIPT_DIR/../tools/bake_lostcoast_tonemap.py" -nt "$BAKE/media/tm_${MAP}.bin" ]]; then
+	python3 "$SCRIPT_DIR/../tools/bake_lostcoast_tonemap.py" --out "$BAKE" || true
+fi
+if [[ -f "$BAKE/media/tm_${MAP}.bin" ]]; then
+	cp -a "$BAKE/media/tm_${MAP}.bin" "$STAGE/media/"
+	echo "  + exposure limits tm_${MAP}.bin"
+fi
 if [[ -f "$BAKE/media/gw_${MAP}.gcw" ]]; then
 	cp -a "$BAKE/media/gw_${MAP}.gcw" "$STAGE/media/"
 	echo "  + water pack gw_${MAP}.gcw ($(wc -c <"$BAKE/media/gw_${MAP}.gcw") bytes)"
