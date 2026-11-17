@@ -100,6 +100,26 @@ def _strip_triangles(indices: list[int], flags: int) -> list[tuple[int, int, int
 	raise ValueError(f"unsupported VTX strip flags: {flags:#x}")
 
 
+def lod_switch_point(vtx: bytes, lod: int = 1) -> float | None:
+	"""Switch point of a LOD from the VTX (studiomdl $lod threshold): Source
+	draws this LOD once the LOD metric reaches it. None when the model has no
+	such LOD."""
+	num_body_parts, body_part_offset = struct.unpack_from("<ii", vtx, 28)
+	best = None
+	for bp in range(num_body_parts):
+		bp_base = body_part_offset + bp * 8
+		num_models, model_offset = struct.unpack_from("<ii", vtx, bp_base)
+		for mi in range(num_models):
+			mh = bp_base + model_offset + mi * 8
+			m_num_lods, lod_offset = struct.unpack_from("<ii", vtx, mh)
+			if lod >= m_num_lods:
+				continue
+			_n, _o, switch = struct.unpack_from("<iif", vtx, mh + lod_offset + lod * 12)
+			if switch > 0 and (best is None or switch < best):
+				best = switch
+	return best
+
+
 def load_source_mesh(mdl: bytes, vvd: bytes, vtx: bytes, lod: int = 2) -> SourceMesh:
 	"""Return triangle mesh for the requested LOD (clamped to available)."""
 	if vvd[:4] != b"IDSV":

@@ -147,6 +147,7 @@ def _stripify(tris):
 
 GC_PR_PIECE_TRIS = 510  # one piece = 32 B header + verts, fits the 16 KB bounce
 GC_PR_MAX_INST = 512
+GC_PR_MAX_MODELS = 192  # engine GC_PROP_MAX_MODELS
 GC_PR_MAX_MAT = 127
 PROP_CLASSNAMES = {"prop_physics", "prop_dynamic", "prop_static"}
 # CapFaces lean stand-ins: Source NPCs / canisters have no GoldSrc LINK_ENTITY,
@@ -1145,6 +1146,61 @@ def bake_props(
 				ids,
 			)
 
+	# Close-up detail. The caps above keep every model small, which shows
+	# when the player stands next to one (thin parts gone, round things
+	# faceted). Triangles the pack has left go to second, full models: Source's
+	# own LOD 0, drawn only inside Source's own LOD 0 range. The range is the
+	# model's LOD 1 switch point (VTX, studiomdl $lod): Source's LOD metric is
+	# 100 / the pixel width of a unit sphere, which on a 640 wide, 75 degree
+	# view is distance / 4.17. Which models get one comes from the map: the
+	# distance from a prop to the nearest info_node (the AI ground nodes cover
+	# where the player can walk), nearest first, while the budget lasts.
+	# Memory compromises: the pack's triangle budget, and CLOSE_MAX_TRIS a
+	# model (a larger chain does not fit the engine's near cache well).
+	CLOSE_MAX_TRIS = 4000
+	LOD_UNITS_PER_METRIC = 320.0 / math.tan(math.radians(75.0 / 2.0)) / 100.0
+	close_models: dict[str, tuple[SourceMesh, float]] = {}
+	nodes = []
+	for blk in re.findall(r"\{([^}]*)\}", ents):
+		kv = dict(re.findall(r'"([^"]+)" "([^"]*)"', blk))
+		if kv.get("classname") == "info_node" and "origin" in kv:
+			nodes.append(tuple(float(v) for v in kv["origin"].split()))
+	spare = GC_PR_MODEL_TRIS - sum(len(model_cache[m][0].tris) for m in used_models)
+	if nodes and spare > 0:
+		import numpy as np
+		from source_mdl import lod_switch_point
+
+		node_arr = np.array(nodes)
+		reach: dict[str, float] = {}
+		for model, origin, _angles in props:
+			if model not in used_models or _npc_model(model):
+				continue
+			d = float(np.sqrt(((node_arr - np.array(origin)) ** 2).sum(axis=1)).min())
+			reach[model] = min(reach.get(model, 1e9), d)
+		for model in sorted(reach, key=lambda m: (reach[m], m)):
+			mesh, ids = model_cache[model]
+			mdl = read_first(vpks, model)
+			base = model[: -4] if model.endswith(".mdl") else model
+			vvd = read_first(vpks, base + ".vvd")
+			vtx = read_first(vpks, base + ".dx90.vtx") or read_first(vpks, base + ".dx80.vtx")
+			try:
+				full = load_source_mesh(mdl, vvd, vtx, lod=0)
+				switch = lod_switch_point(vtx, 1)
+			except Exception:  # noqa: BLE001
+				continue
+			if switch is None or len(full.tris) <= len(mesh.tris):
+				continue
+			if len(full.tris) > CLOSE_MAX_TRIS or len(full.tris) > spare:
+				continue
+			dist = switch * LOD_UNITS_PER_METRIC
+			if reach[model] > dist:
+				continue  # the player never gets inside its LOD 0 range
+			close_models[model] = (full, dist)
+			spare -= len(full.tris)
+			print(f"  close model {model}: {len(mesh.tris)} → {len(full.tris)} tris inside {dist:.0f} units "
+				f"($lod {switch:g}; {reach[model]:.0f} units from the nearest node)")
+		print(f"  close models: {len(close_models)}; {spare} tris of the budget left")
+
 	# ---- pack v3: models once, instances carry origin + angles ----
 	def mat_byte(ids, local):
 		raw = ids[local] if 0 <= local < len(ids) else ids[0]
@@ -1235,7 +1291,7 @@ def bake_props(
 			total += ntris
 		return dl_ofs, 32 + len(pieces[0][2]), total
 
-	def add_model(key, mesh, ids, rotate_walk=False):
+	def add_model(key, mesh, ids, rotate_walk=False, close_of=None):
 		if key in model_index:
 			return model_index[key]
 		pts = [((p[1], -p[0], p[2]) if rotate_walk else p) for p in mesh.positions]
@@ -1255,6 +1311,13 @@ def bake_props(
 		# Far chains live in their own region at the end of the file so the
 		# engine can keep all of them resident and draw the horizon with no
 		# ARAM read. A model too small to reduce gets a copy there.
+		if close_of is not None:
+			# A close model is only drawn near: it borrows its small model's
+			# far chain instead of adding one to the resident far region.
+			_b = model_recs[close_of]
+			model_index[key] = len(model_recs)
+			model_recs.append((full[0], full[1], full[2], frac, _b[4], _b[5], _b[6]))
+			return model_index[key]
 		far = None
 		# At most 96 triangles: a far instance is under 5 % of the view, and
 		# the whole region has to fit in about 250 KB of MEM1.
@@ -1298,6 +1361,7 @@ def bake_props(
 	n_sunlit = 0
 	light_blob = bytearray()
 	sun_dir = (0.0, 0.0, 1.0)
+	close_link: dict = {}  # model record -> (close model record, range); model name -> done
 	for model, origin, angles in props:
 		got = mesh_for(model)
 		if got is None:
@@ -1306,6 +1370,11 @@ def bake_props(
 		mi = add_model(model, mesh, ids)
 		if mi is None:
 			continue
+		if model in close_models and model not in close_link and len(model_recs) < GC_PR_MAX_MODELS:
+			_ci = add_model(model + "#close", close_models[model][0], ids, close_of=mi)
+			if _ci is not None:
+				close_link[mi] = (_ci, close_models[model][1])
+				close_link[model] = True
 		pitch, yaw, roll = angles
 		xform = angle_matrix(pitch, yaw, roll)
 		mins = [32767.0] * 3
@@ -1372,10 +1441,14 @@ def bake_props(
 	for stale in out_dir.glob("prop_*.cmp"):
 		stale.unlink()
 	model_blob = bytearray()
-	for dl_ofs, first_bytes, tris, frac, far_ofs, far_bytes, far_tris in model_recs:
+	for _mi, (dl_ofs, first_bytes, tris, frac, far_ofs, far_bytes, far_tris) in enumerate(model_recs):
+		# Close model: record index + 1 in the last word, its range in units
+		# of 8 in the byte after frac. Both were padding (0 = none).
+		_cm, _cd = close_link.get(_mi, (None, 0.0)) if isinstance(close_link.get(_mi), tuple) else (None, 0.0)
 		model_blob += struct.pack(
-			">IIHBBIIHH", dl_ofs, first_bytes, min(65535, tris), frac, 0,
-			far_ofs, far_bytes, min(65535, far_tris), 0,
+			">IIHBBIIHH", dl_ofs, first_bytes, min(65535, tris), frac,
+			0 if _cm is None else max(1, min(255, int(round(_cd / 8.0)))),
+			far_ofs, far_bytes, min(65535, far_tris), 0 if _cm is None else _cm + 1,
 		)
 	model_blob += b"\0" * (-len(model_blob) % 32)
 	# Pack v7: after the instances, 32 bytes with the sun direction (toward
