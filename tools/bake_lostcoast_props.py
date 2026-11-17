@@ -243,9 +243,15 @@ def _tri_cap(model: str, natural: int) -> int:
 
 
 def _max_side(model: str, texname: str) -> int:
-	"""Chair, hull, crate and gate keep a 256² top. Everything else tops at 128²."""
-	low = f"{model} {texname}".lower()
-	if any(s in low for s in ("chair", "boat", "crate", "gate")):
+	"""The two coast rock textures keep a 256² top; everything else tops at 128².
+
+	The engine has two big texture slots that hold a whole 256² chain, and
+	the rocks are what stands in front of the eye in the cove. A 256² chain
+	without a big slot loses its top level when it is bound (a near slot
+	holds 128²), which is what happened to the chair, boat, crate and gate
+	textures that used to be 256² here: they only cost ARAM."""
+	low = texname.lower()
+	if "coastrock" in low:
 		return 256
 	return 128
 
