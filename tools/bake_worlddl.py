@@ -138,6 +138,9 @@ class Bsp:
 			map_face = struct.unpack_from("<H", raw, i + 36)[0]
 			self.disps.append((start, vert_start, power, map_face))
 		self.dispverts = lump(d, 33)
+		# Displacement faces by their first edge (a face tuple does not carry
+		# its own index): the start position decides how their lightmap lies.
+		self.disp_start = {self.faces[mf][3]: start for (start, _vs, _pw, mf) in self.disps if 0 <= mf < len(self.faces)}
 
 	def face_pts(self, f) -> list:
 		first, num = f[3], f[4]
@@ -186,6 +189,9 @@ def light_at(bsp: Bsp, f, base_pt) -> tuple[int, int, int]:
 	lw, lh = f[13] + 1, f[14] + 1
 	s = ti[2][0] * base_pt[0] + ti[2][1] * base_pt[1] + ti[2][2] * base_pt[2] + ti[2][3] - f[11]
 	t = ti[3][0] * base_pt[0] + ti[3][1] * base_pt[1] + ti[3][2] * base_pt[2] + ti[3][3] - f[12]
+	dl = disp_luxel(bsp, f, base_pt)
+	if dl is not None:
+		s, t = dl
 	s = max(0.0, min(lw - 1.0, s))
 	t = max(0.0, min(lh - 1.0, t))
 	x0, y0 = int(s), int(t)
@@ -217,9 +223,41 @@ def pack_nrm(n) -> tuple[int, int, int]:
 	return tuple(int(max(-32767, min(32767, round(c * scale)))) for c in (x, y, z))
 
 
+def disp_luxel(bsp: Bsp, f, pt):
+	"""Luxel coordinates of a base point on a displacement face, or None.
+
+	A displacement's lightmap does not follow the face's lightmap vectors.
+	Source lays it over the displacement's own grid: with the face corners
+	taken from the one nearest the displacement's start position, corner 0
+	is luxel (0, 0), corner 1 (0, H), corner 2 (W, H), corner 3 (W, 0). The
+	vectors gave some sand patches a flipped lightmap: the cliff's shadow
+	landed on the wrong side of the patch and met its lit neighbour in a
+	hard straight seam.
+	"""
+	start = bsp.disp_start.get(f[3])
+	if start is None:
+		return None
+	pts = bsp.face_pts(f)
+	if len(pts) != 4:
+		return None
+	k = min(range(4), key=lambda i: sum((pts[i][a] - start[a]) ** 2 for a in range(3)))
+	p0, p1, _p2, p3 = pts[k:] + pts[:k]
+	e_s = [p3[a] - p0[a] for a in range(3)]
+	e_t = [p1[a] - p0[a] for a in range(3)]
+	d = [pt[a] - p0[a] for a in range(3)]
+	ls = sum(c * c for c in e_s) or 1.0
+	lt = sum(c * c for c in e_t) or 1.0
+	u = sum(d[a] * e_s[a] for a in range(3)) / ls
+	v = sum(d[a] * e_t[a] for a in range(3)) / lt
+	return u * f[13], v * f[14]
+
+
 def luxel_uv(bsp: Bsp, f, pt) -> tuple[float, float, int, int]:
 	ti = bsp.texinfos[f[5]]
 	lw, lh = f[13] + 1, f[14] + 1
+	dl = disp_luxel(bsp, f, pt)
+	if dl is not None:
+		return dl[0], dl[1], lw, lh
 	s = ti[2][0] * pt[0] + ti[2][1] * pt[1] + ti[2][2] * pt[2] + ti[2][3] - f[11]
 	t = ti[3][0] * pt[0] + ti[3][1] * pt[1] + ti[3][2] * pt[2] + ti[3][3] - f[12]
 	return s, t, lw, lh
@@ -265,6 +303,48 @@ def rgb565_page(pix) -> bytes:
 	return bytes(out)
 
 
+DISP_CELLS: list = []  # (face, cluster, cell side) of every displacement, for the bake log
+
+
+# Lightmap cells are planned per page before they are handed out. Faces used
+# to take cells first come first served, 16 x 16 for a big patch, until the
+# 32 x 32 page was full: of the map's 525 displacement patches 156 got no cell
+# at all and drew with vertex light beside lightmapped neighbours, the hard
+# seams where sand patches meet. bake() now runs twice: the first run only
+# records what each page is asked for (LM_PLAN is None), then every page's
+# requests are shrunk by one common factor until they all fit, and the second
+# run hands out the planned cells. Pages are numbered in creation order,
+# which is the same in both runs.
+LM_PLAN: dict | None = None
+LM_REQUESTS: dict[int, list[int]] = {}
+LM_COUNTER = [0]
+
+
+def plan_lightmap_pages() -> dict:
+	plan = {}
+	for page, sides in LM_REQUESTS.items():
+		for scale in (1.0, 0.875, 0.75, 0.625, 0.5, 0.4375, 0.375, 0.3125, 0.25, 0.1875, 0.125):
+			want = [max(2, int(round(sd * scale))) for sd in sides]
+			order = sorted(range(len(want)), key=lambda i: -want[i])
+			rects = [None] * len(want)
+			x = y = row_h = 0
+			ok = True
+			for i in order:
+				w = want[i]
+				if x + w > 32:
+					x, y, row_h = 0, y + row_h, 0
+				if y + w > 32:
+					ok = False
+					break
+				rects[i] = (x, y, w, w)
+				x += w
+				row_h = max(row_h, w)
+			if ok:
+				break
+		plan[page] = rects
+	return plan
+
+
 class LmPage:
 	def __init__(self) -> None:
 		# Mid-grey pad — unused atlas texels used to be white, so any vert
@@ -273,6 +353,9 @@ class LmPage:
 		self.x = self.y = self.row_h = 0
 		self.used = False
 		self.failed = False
+		self.index = LM_COUNTER[0]
+		LM_COUNTER[0] += 1
+		self.seq = 0
 
 	def _try(self, w: int, h: int):
 		x, y, rh = self.x, self.y, self.row_h
@@ -286,6 +369,17 @@ class LmPage:
 		return (x, y, w, h)
 
 	def alloc(self, w: int, h: int):
+		if LM_PLAN is None:
+			# Recording run: note the size wanted, hand out a placeholder.
+			LM_REQUESTS.setdefault(self.index, []).append(max(2, min(16, w, h)))
+			self.used = True
+			return (0, 0, 2, 2)
+		rects = LM_PLAN.get(self.index)
+		rect = rects[self.seq] if rects and self.seq < len(rects) else None
+		self.seq += 1
+		if rect:
+			self.used = True
+		return rect
 		if self.failed:
 			return None
 		side = max(2, min(16, w, h))
@@ -805,6 +899,7 @@ def bake(map_bsp: Path, out_dir: Path, max_disp_power: int) -> None:
 			ch = chunks.setdefault(cluster, Chunk())
 			samples = face_samples(bsp, f)
 			cell = ch.lm.alloc(f[13] + 1, f[14] + 1) if samples else None
+			DISP_CELLS.append((fi, cluster, cell[2] if cell else 0))
 			if cell and samples:
 				ch.lm.blit(cell, samples)
 			edge_vertices = grid[0] + grid[-1] + [row[0] for row in grid] + [row[-1] for row in grid]
@@ -1223,6 +1318,9 @@ def bake(map_bsp: Path, out_dir: Path, max_disp_power: int) -> None:
 	print(f"  tree nodes={len(bsp.nodes)} planes={len(plane_remap)} ({(len(node_blob) + len(plane_blob)) // 1024} KB)")
 	print(f"  pvs rows={len(pvs_blob) // 1024} KB chunkdir={len(order) * 24 // 1024} KB")
 	print(f"  MEM1 resident={resident // 1024} KB  ARAM chunks={run // 1024} KB (max chunk {max_chunk // 1024} KB)")
+	import collections as _c
+	_h = _c.Counter(side for _f, _cl, side in DISP_CELLS)
+	print(f"  displacement lightmap cells by side: {dict(sorted(_h.items()))}")
 	print(f"  envmap mats={sum(1 for *_, fl, _s in mat_recs if fl & MAT_F_ENVMAP)} lightmap pages left={LM_PAGES_LEFT}")
 	print(f"  wrote {out} ({len(body) // 1024} KB)")
 
@@ -1233,6 +1331,18 @@ def main() -> int:
 	ap.add_argument("--out", type=Path, default=ROOT / "cache/bake")
 	ap.add_argument("--max-disp-power", type=int, default=4)
 	args = ap.parse_args()
+	global LM_PLAN
+	# Run 1 records the lightmap cells each page is asked for; run 2 bakes
+	# with the planned cells (see LM_PLAN).
+	import contextlib, io
+	with contextlib.redirect_stdout(io.StringIO()):
+		bake(args.map, args.out, args.max_disp_power)
+	LM_PLAN = plan_lightmap_pages()
+	LM_COUNTER[0] = 0
+	ENV_SPLIT.clear()
+	DISP_CELLS.clear()
+	_unfit = sum(1 for r in LM_PLAN.values() for c in r if c is None)
+	print(f"  lightmap plan: {len(LM_PLAN)} pages, {sum(len(r) for r in LM_PLAN.values())} cells, {_unfit} without room")
 	bake(args.map, args.out, args.max_disp_power)
 	return 0
 
