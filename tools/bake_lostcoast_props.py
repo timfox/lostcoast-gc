@@ -1059,6 +1059,45 @@ def bake_props(
 		if mesh is None or not mesh.tris:
 			model_cache[model] = None
 			return None
+		# A lower LOD may drop a whole material. When that material's VMT
+		# says $nolod (the chain-link panel of props_c17/fence01b), Source
+		# keeps drawing it at every distance, so its triangles come back from
+		# LOD 0.
+		if lod != 0:
+			try:
+				full = load_source_mesh(mdl, vvd, vtx, lod=0)
+			except Exception:  # noqa: BLE001
+				full = None
+			lost = (set(full.tri_mat) - set(mesh.tri_mat)) if full and full.tris else set()
+			if lost:
+				from vmt import load_vmt
+				_cds, _names = _mdl_materials(mdl)
+
+				def _nolod(mi: int) -> bool:
+					if mi >= len(_names):
+						return False
+					for _cd in _cds or [""]:
+						_raw = read_first(vpks, f"materials/{_cd}/{_names[mi]}.vmt" if _cd else f"materials/{_names[mi]}.vmt")
+						if _raw:
+							try:
+								return float(load_vmt(_raw).get("$nolod", "0") or 0) >= 1.0
+							except ValueError:
+								return False
+					return False
+
+				lost = {mi for mi in lost if _nolod(mi)}
+			if lost:
+				base = len(mesh.positions)
+				pos = list(mesh.positions) + list(full.positions)
+				uv = list(mesh.uvs) + list(full.uvs)
+				tris = list(mesh.tris)
+				tmat = list(mesh.tri_mat)
+				for t, tm in zip(full.tris, full.tri_mat):
+					if tm in lost:
+						tris.append(tuple(i + base for i in t))
+						tmat.append(tm)
+				print(f"  mesh {model}: lod{lod} drops $nolod materials {sorted(lost)}; {len(tris) - len(mesh.tris)} tris kept from lod0")
+				mesh = SourceMesh(positions=pos, uvs=uv, tris=tris, tri_mat=tmat)
 		ids = materials_for(model, mdl)
 		natural = len(mesh.tris)
 		cap = _tri_cap(model, natural)
