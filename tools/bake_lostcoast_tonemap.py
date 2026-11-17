@@ -16,7 +16,7 @@ camera against the boxes (there is no player).
 Not baked: SetBloomScale, and the intro's BlendTonemapScale fade.
 
   header 24 bytes : "GCtm", u16 version (1), u16 count, f32 baked exposure
-                    (bake_worlddl LIGHT_EXPOSURE), f32 default min, f32 default max,
+                    (bake_worlddl LIGHT_EXPOSURE), f32 min, f32 max at map spawn,
                     4 spare
   record 44 bytes : f32 mins[3], f32 maxs[3], f32 enter_max, f32 enter_min,
                     f32 leave_max, f32 leave_min (negative = leave unchanged),
@@ -86,8 +86,38 @@ def main() -> None:
 		recs.append(struct.pack(">6f4fI", *mins, *maxs, enter["max"], enter["min"], leave["max"], leave["min"], once))
 		print(f"  {dk['classname']} {model}: box {[round(v) for v in mins]} .. {[round(v) for v in maxs]} "
 			f"enter max/min {enter['max']}/{enter['min']} leave {leave['max']}/{leave['min']}")
+	# The limits the level starts with: what the map sends the controller when
+	# it spawns (logic_auto OnMapSpawn, straight or through a logic_relay it
+	# triggers). d2_lostcoast: e3_start sets min 0.9, max 3. Without them the
+	# engine defaults apply (mat_autoexposure_min / _max).
+	start = {"min": DEFAULT_MIN, "max": DEFAULT_MAX}
+	by_name: dict[str, list] = {}
+	for kv, dk in blocks:
+		if dk.get("targetname"):
+			by_name.setdefault(dk["targetname"], []).append(kv)
+
+	def apply(outputs, key_names, depth=0):
+		for key, val in outputs:
+			if key not in key_names:
+				continue
+			parts = val.split(",")
+			if len(parts) < 3:
+				continue
+			if parts[0] in controllers:
+				which = {"SetAutoExposureMax": "max", "SetAutoExposureMin": "min"}.get(parts[1])
+				if which:
+					start[which] = float(parts[2])
+			elif parts[1] == "Trigger" and depth < 4:
+				for kv2 in by_name.get(parts[0], []):
+					if dict(kv2).get("classname") == "logic_relay":
+						apply(kv2, ("OnTrigger",), depth + 1)
+
+	for kv, dk in blocks:
+		if dk.get("classname") == "logic_auto":
+			apply(kv, ("OnMapSpawn", "OnNewGame"))
+	print(f"  limits at map spawn: {start['min']} .. {start['max']}")
 	out = args.out / "media" / f"tm_{args.map.stem.lower()}.bin"
-	out.write_bytes(struct.pack(">4sHHfff4x", b"GCtm", 1, len(recs), LIGHT_EXPOSURE, DEFAULT_MIN, DEFAULT_MAX) + b"".join(recs))
+	out.write_bytes(struct.pack(">4sHHfff4x", b"GCtm", 1, len(recs), LIGHT_EXPOSURE, start["min"], start["max"]) + b"".join(recs))
 	print(f"  wrote {out} volumes={len(recs)} baked exposure {LIGHT_EXPOSURE}")
 
 

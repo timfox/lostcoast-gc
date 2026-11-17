@@ -186,6 +186,15 @@ for w in ${LCGC_EXTRA_CFG:-}; do
 	echo "$w" >> "$NEST/lostcoast/gamecube.cfg"
 	echo "  + gamecube.cfg: $w"
 done
+# LCGC_TAS=path/to/name.tas: replay a pad script (engine tas_gamecube.c:
+# "frames buttons stickX stickY cstickX cstickY" a line) so a probe can walk
+# the player with nobody at the controls.
+if [[ -n "${LCGC_TAS:-}" && -f "${LCGC_TAS}" ]]; then
+	mkdir -p "$NEST/lostcoast/tas"
+	cp -a "$LCGC_TAS" "$NEST/lostcoast/tas/"
+	echo "tas $(basename "${LCGC_TAS%.tas}")" >> "$NEST/lostcoast/gamecube.cfg"
+	echo "  + gamecube.cfg: tas $(basename "${LCGC_TAS%.tas}")"
+fi
 # LCGC_VST=1: video-stress-test disc — ride the retail ptrack_vst flythrough
 # (whole-map coverage for render parity). Pair with a private LCGC_ISO and
 # XASH3D_GC_ISO_CACHE so the still-eye disc is left alone (scripts/probe-vst.sh).
