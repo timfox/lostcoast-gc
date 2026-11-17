@@ -17,7 +17,9 @@ Not baked: SetBloomScale, and the intro's BlendTonemapScale fade.
 
   header 24 bytes : "GCtm", u16 version (1), u16 count, f32 baked exposure
                     (bake_worlddl LIGHT_EXPOSURE), f32 min, f32 max at map spawn,
-                    4 spare
+                    f32 sky exposure (SKY_EXPOSURE: the tonemap scale the sky box
+                    textures were baked at from the HDR sky; 0 = the sky is
+                    screen art and the engine leaves it alone)
   record 44 bytes : f32 mins[3], f32 maxs[3], f32 enter_max, f32 enter_min,
                     f32 leave_max, f32 leave_min (negative = leave unchanged),
                     u32 flags (1 = once)
@@ -36,6 +38,20 @@ sys.path.insert(0, str(ROOT / "tools"))
 from bake_worlddl import LIGHT_EXPOSURE, Bsp  # noqa: E402
 
 DEFAULT_MIN, DEFAULT_MAX = 0.5, 2.0  # mat_autoexposure_min / _max
+# The sky box is baked as gamma( HDR sky x SKY_EXPOSURE ) (scripts/
+# bake-lostcoast-sky.sh). Source draws the sky as HDR x tonemap scale; the
+# engine multiplies the sky by ( scale / SKY_EXPOSURE )^( 1 / 2.2 ), up to 2.
+# At 1 the 8-bit texture clips only where the HDR sky is over 1 (the sun's
+# glare), and scales up to 4.6 stay inside the engine's factor of 2.
+SKY_EXPOSURE = 1.0
+# The world is baked as gamma( light x LIGHT_EXPOSURE ). Which tonemap scale
+# that picture stands for is measured, not derived: in the retail still of the
+# cove (playtests/reference/retail-hd-cove.png, the default dumpeye view) the
+# sky sits at scale 1.55 (it equals the HDR sky x 1.55), and at that scale the
+# sand, the ship's hull and the dark water match ours when the baked picture
+# counts as scale 1.4, i.e. LIGHT_EXPOSURE / 2. With LIGHT_EXPOSURE itself as
+# the scale the world came out 1.8 times too dark there.
+WORLD_LIGHT_UNITS = 2.0
 
 
 def main() -> None:
@@ -117,8 +133,8 @@ def main() -> None:
 			apply(kv, ("OnMapSpawn", "OnNewGame"))
 	print(f"  limits at map spawn: {start['min']} .. {start['max']}")
 	out = args.out / "media" / f"tm_{args.map.stem.lower()}.bin"
-	out.write_bytes(struct.pack(">4sHHfff4x", b"GCtm", 1, len(recs), LIGHT_EXPOSURE, start["min"], start["max"]) + b"".join(recs))
-	print(f"  wrote {out} volumes={len(recs)} baked exposure {LIGHT_EXPOSURE}")
+	out.write_bytes(struct.pack(">4sHHffff", b"GCtm", 1, len(recs), LIGHT_EXPOSURE / WORLD_LIGHT_UNITS, start["min"], start["max"], SKY_EXPOSURE) + b"".join(recs))
+	print(f"  wrote {out} volumes={len(recs)} baked picture = scale {LIGHT_EXPOSURE / WORLD_LIGHT_UNITS}, sky baked at {SKY_EXPOSURE}")
 
 
 if __name__ == "__main__":

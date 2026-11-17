@@ -71,32 +71,35 @@ sides = ("rt", "bk", "lf", "ft", "up", "dn")
 SIZE = 128
 OUT.mkdir(parents=True, exist_ok=True)
 
-# Prefer HDR VTFs; fall back to LDR sky_lostcoast* if HDR decode fails.
+# The HDR set (RGBA16161616F, linear light) x SKY_EXPOSURE, gamma encoded. The
+# engine scales the sky with the map's tonemap scale, as Source does (HDR sky
+# x scale), so the sky is baked in light units, not taken from the LDR art
+# (which is the same picture at scale 1.55, clipped). Falls back to the LDR
+# art when a side has no HDR file.
+from bake_lostcoast_tonemap import SKY_EXPOSURE
 src_note = []
 preview = Image.new("RGB", (SIZE * 6, SIZE))
 for i, side in enumerate(sides):
 	img = None
 	used = None
-	# LDR set first. The HDR set through exposure 6 + Reinhard came out
-	# near white (top 150,179,203); retail's sky top is (68,98,140) and the
-	# LDR art sits at (84,114,153), so it only needs a small pull-down.
-	for stem in (f"sky_lostcoast{side}", f"sky_lostcoast_hdr{side}"):
-		raw = read_first(vpks, f"materials/skybox/{stem}.vtf")
-		if not raw:
-			continue
-		try:
-			vtf = decode_vtf(raw)
-			img = Image.frombytes("RGBA", (vtf.width, vtf.height), vtf.rgba).convert("RGB")
-			used = stem
-			break
-		except Exception as e:
-			src_note.append(f"{stem}: {e}")
-			continue
+	raw = read_first(vpks, f"materials/skybox/sky_lostcoast_hdr{side}.vtf")
+	if raw and struct.unpack_from("<i", raw, 52)[0] == 24:
+		w, h = struct.unpack_from("<HH", raw, 16)
+		hdr = np.frombuffer(raw[-w * h * 8:], dtype="<f2").reshape(h, w, 4)[..., :3].astype(np.float64)
+		# Box filter in linear light down to the texture size.
+		f = w // SIZE
+		if f >= 1 and w == h and w % SIZE == 0:
+			hdr = hdr.reshape(SIZE, f, SIZE, f, 3).mean((1, 3))
+			img = Image.fromarray((np.clip(hdr * SKY_EXPOSURE, 0.0, 1.0) ** (1.0 / 2.2) * 255.0 + 0.5).astype(np.uint8))
+			used = f"sky_lostcoast_hdr{side}"
 	if img is None:
-		raise SystemExit(f"missing/undecodable sky side {side}")
-	img = img.resize((SIZE, SIZE), Image.Resampling.LANCZOS)
-	if used and "_hdr" not in used:
-		img = Image.fromarray((np.asarray(img).astype(np.float32) * 1.0).clip(0, 255).astype(np.uint8))
+		raw = read_first(vpks, f"materials/skybox/sky_lostcoast{side}.vtf")
+		if not raw:
+			raise SystemExit(f"missing sky side {side}")
+		vtf = decode_vtf(raw)
+		img = Image.frombytes("RGBA", (vtf.width, vtf.height), vtf.rgba).convert("RGB").resize((SIZE, SIZE), Image.Resampling.LANCZOS)
+		used = f"sky_lostcoast{side}"
+		src_note.append(f"{side}: LDR art (no HDR side)")
 	preview.paste(img, (i * SIZE, 0))
 	cmpr = gx_cmpr_encode(np.asarray(img))
 	assert len(cmpr) == SIZE * SIZE // 2, len(cmpr)

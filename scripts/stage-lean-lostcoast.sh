@@ -233,7 +233,8 @@ shopt -u nullglob
 
 # Source→GX skybox (sky_lostcoast_hdr → media/sky_sky_lostcoast_hdr*.cmp)
 SKYNAME="sky_lostcoast_hdr"
-if [[ ! -f "$BAKE/media/sky_${SKYNAME}rt.cmp" ]]; then
+if [[ ! -f "$BAKE/media/sky_${SKYNAME}rt.cmp" || "$SCRIPT_DIR/bake-lostcoast-sky.sh" -nt "$BAKE/media/sky_${SKYNAME}rt.cmp" \
+	|| "$SCRIPT_DIR/../tools/bake_lostcoast_tonemap.py" -nt "$BAKE/media/sky_${SKYNAME}rt.cmp" ]]; then
 	bash "$SCRIPT_DIR/bake-lostcoast-sky.sh" "$BAKE/media" "$SKYNAME"
 fi
 cp -a "$BAKE/media"/sky_"${SKYNAME}"*.cmp "$STAGE/media/"
