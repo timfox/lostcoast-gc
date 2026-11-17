@@ -627,6 +627,54 @@ def _mdl_materials(mdl: bytes) -> tuple[list[str], list[str]]:
 	return cds, names
 
 
+ENV_MAX = 16
+
+
+def _env_material(vpks, vmt_raw: bytes):
+	"""(mask rgba, w, h, constant) for a prop material the engine reflects, or None.
+
+	This round only $envmap materials masked by $normalmapalphaenvmapmask whose
+	name says coast rock (coastrock001, coastrock02): the rocks are what the
+	retail shots show glinting, and every further material costs a texture
+	chain and a second draw. Constant = 255 x 0.5 x exposure x tint^2, the
+	world reflection pass's (bake_worlddl.load_envmap); mask texel = mask^2.
+	"""
+	import numpy as np
+	from vmt import load_vmt
+	from vtf import decode_vtf
+	from bake_worlddl import LIGHT_EXPOSURE
+	m = load_vmt(vmt_raw)
+	env = (m.get("$envmap") or "").strip().lower()
+	if env in ("", "0", "none") or float(m.get("$normalmapalphaenvmapmask", "0") or 0) < 1.0:
+		return None
+	bump = (m.get("$bumpmap") or "").replace("\\", "/").lower()
+	if "coastrock" not in bump:
+		return None
+	raw = read_first(vpks, f"materials/{bump}.vtf")
+	if raw is None:
+		return None
+	# Square at full resolution, then average down: the mask is flecks
+	# (about 40 % of the texels near 0.85, the rest near 0.06), and squaring
+	# an already averaged mask loses most of their light.
+	img = decode_vtf(raw, max_side=256)
+	a = np.frombuffer(img.rgba, np.uint8).reshape(img.height, img.width, 4)[..., 3].astype(np.float64) / 255.0
+	sq = a * a
+	side = 64
+	fy, fx = img.height // side, img.width // side
+	if fy >= 1 and fx >= 1 and img.height % side == 0 and img.width % side == 0:
+		sq = sq.reshape(side, fy, side, fx).mean(axis=(1, 3))
+	g = np.clip(sq * 255.0 + 0.5, 0, 255).astype(np.uint8)
+	rgba = np.stack([g, g, g, np.full_like(g, 255)], -1)
+	img = type("M", (), {"width": g.shape[1], "height": g.shape[0]})()
+	nums = [float(x) for x in re.findall(r"[-+]?\d*\.?\d+", m.get("$envmaptint") or "1 1 1")][:3]
+	if len(nums) < 3:
+		nums = [nums[0] if nums else 1.0] * 3
+	if "{" in (m.get("$envmaptint") or "") or max(nums) > 1.5:
+		nums = [v / 255.0 for v in nums]
+	tint = tuple(int(max(0, min(255, round(255.0 * 0.5 * LIGHT_EXPOSURE * max(0.0, v) ** 2.0)))) for v in nums)
+	return rgba.tobytes(), img.width, img.height, tint
+
+
 def _additive_vmt(vmt: bytes) -> bool:
 	"""Source $additive. The stained-glass shafts live in this mode."""
 	lines = []
@@ -898,6 +946,7 @@ def bake_props(
 		print(f"  mat {name} {label} {tw}x{th} lv={lv} {len(body)}B")
 		return mat_of[key]
 
+	env_mats: dict[int, tuple] = {}  # texture chain -> (mask chain, constant RGB)
 	def materials_for(model: str, mdl: bytes) -> list[int]:
 		cds, names = _mdl_materials(mdl)
 		if not names:
@@ -933,6 +982,17 @@ def bake_props(
 				rel, rgba, w, h, _max_side(model, name),
 				f"{name} ← {rel}",
 			)
+			# $envmap with the mask in the normal map's alpha (the coast rocks):
+			# the engine adds ( cubemap x tint x mask )^2 over the piece, the
+			# VertexLitGeneric term at $envmapcontrast 1. The mask goes in the
+			# texture pack as its own small chain, already squared.
+			if not skipped and idx not in env_mats and len(env_mats) < ENV_MAX and vmt:
+				_env = _env_material(vpks, vmt)
+				if _env is not None:
+					_mask_rgba, _mw, _mh, _tint = _env
+					_mask_idx = ensure_mat("envmask:" + rel, _mask_rgba, _mw, _mh, 64, f"env mask of {name}")
+					env_mats[idx] = (_mask_idx, _tint)
+					print(f"  envmap {name}: mask chain {_mask_idx} constant {_tint}")
 			# 0x100 marks an additive material. The tri byte keeps the
 			# chain index in the low 7 bits and the blend in bit 7.
 			ids.append(idx | (0x100 if skipped else 0))
@@ -1097,7 +1157,8 @@ def bake_props(
 		total = 0
 		for n, (mid, nverts, body, ntris) in enumerate(pieces):
 			nxt = (32 + len(pieces[n + 1][2])) if n + 1 < len(pieces) else 0
-			blob.extend(struct.pack(">BBHIIH", mid, piece_flags, nverts, len(body), nxt, ntris) + b"\0" * 18)
+			# Piece flag 2: the material reflects (env table at the end of the instances).
+			blob.extend(struct.pack(">BBHIIH", mid, piece_flags | (2 if (mid & 0x7F) in env_mats and not mid & 0x80 else 0), nverts, len(body), nxt, ntris) + b"\0" * 18)
 			blob.extend(body)
 			total += ntris
 		return dl_ofs, 32 + len(pieces[0][2]), total
@@ -1250,6 +1311,12 @@ def bake_props(
 	# sky RGB, sun RGB, 3 spare. Padded to 32.
 	inst_blob += struct.pack(">3h", *[int(round(max(-1.0, min(1.0, c)) * 32767.0)) for c in sun_dir]).ljust(32, b"\0")
 	inst_blob += bytes(light_blob)
+	inst_blob += b"\0" * (-len(inst_blob) % 32)
+	# Reflective materials: 32 bytes ("PEnv", u16 count), then 8 bytes each:
+	# texture chain, mask chain, constant RGB, 3 spare. Padded to 32.
+	inst_blob += struct.pack(">4sH", b"PEnv", len(env_mats)).ljust(32, b"\0")
+	for _mi in sorted(env_mats):
+		inst_blob += struct.pack(">BB3B3x", _mi, env_mats[_mi][0], *env_mats[_mi][1])
 	inst_blob += b"\0" * (-len(inst_blob) % 32)
 	print(f"  prop lighting: {n_inst} instances, {n_sunlit} reach the sun, sun toward {tuple(round(c, 3) for c in sun_dir)}")
 	inst_ofs = 32
