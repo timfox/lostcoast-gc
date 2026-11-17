@@ -11,9 +11,11 @@ Orientation is the Source one for a static decal: image up is world up
 projected onto the host plane, so graffiti and ivy hang upright on walls; on
 level ground the image axes follow world +X.
 
-Memory compromise (not a look choice): N_ATLAS atlases. Every texture gets the
-same texels per world unit, the largest that fits, up to one whole atlas for
-a texture. Textures are put into atlases in order along the map, so one view
+Memory compromise (not a look choice): N_ATLAS atlases, one of them for the
+part-transparent paint with a 4-bit alpha page of its own (media/da_<map>.bin,
+blended by the engine); the others are 1-bit cut-outs. Within each kind every
+texture gets the same texels per world unit, the largest that fits, up to one
+whole atlas for a texture. Textures are put into atlases in order along the map, so one view
 binds few of them.
 
 Writes <out>/infodecals.json: atlas size and names, the tile of every texture
@@ -34,6 +36,7 @@ from vtf import decode_vtf
 
 ATLAS = 128  # one near texture slot (128x128 CMPR chain)
 N_ATLAS = 6
+SOFT_ATLASES = 1
 ATLAS_NAME = "lostcoast/decals/atlas"  # + index
 
 
@@ -102,10 +105,10 @@ def _place(free: list, w: int, h: int):
 	return fx, fy
 
 
-def _partition(order, tex, density: float):
+def _partition(order, tex, density: float, max_bins: int):
 	"""Largest first, each into the first atlas with room (ties in map order,
 	so neighbours tend to share an atlas). Returns [(sizes, pos)] or None when
-	the textures need more than N_ATLAS at this density."""
+	the textures need more than max_bins atlases at this density."""
 	items = []
 	for k, n in enumerate(order):
 		arr, ww, wh = tex[n][:3]
@@ -117,7 +120,7 @@ def _partition(order, tex, density: float):
 			if xy:
 				break
 		else:
-			if len(bins) == N_ATLAS:
+			if len(bins) == max_bins:
 				return None
 			sizes, pos, free = [], {}, [(0, 0, ATLAS, ATLAS)]
 			bins.append((sizes, pos, free))
@@ -129,7 +132,7 @@ def _partition(order, tex, density: float):
 	return [(sizes, pos) for sizes, pos, _free in bins]
 
 
-def build(bsp_bytes: bytes, vpks, read_first) -> tuple[dict, list[np.ndarray]] | None:
+def build(bsp_bytes: bytes, vpks, read_first) -> tuple[dict, list[np.ndarray], np.ndarray | None] | None:
 	decals = parse_decals(bsp_bytes)
 	if not decals:
 		return None
@@ -159,18 +162,42 @@ def build(bsp_bytes: bytes, vpks, read_first) -> tuple[dict, list[np.ndarray]] |
 	pts = np.array([org[n] for n in tex])
 	axis = int(np.argmax(pts.max(axis=0) - pts.min(axis=0)))
 	order = sorted(tex, key=lambda n: (org[n][axis], n))
-	groups = None
-	density = 2.0
-	while density > 0.05:
-		groups = _partition(order, tex, density)
-		if groups:
-			break
-		density *= 0.98
-	if not groups:
+
+	# Paint (graffiti) is mostly part-transparent: of its texels that show at
+	# all, a third or more are neither clear nor solid. Those textures go in
+	# one atlas whose alpha is a separate 4-bit page the engine blends with
+	# (SOFT_ATLASES = 1: the map arena has room for one 8 KB page). Plaster
+	# and ivy have hard edges and stay 1-bit cut-outs.
+	def _soft(n: str) -> bool:
+		# A sheet that fills an atlas even at half a texel per unit (the two
+		# 256-unit ivy sheets) cannot share the one page.
+		if max(tex[n][1], tex[n][2]) >= 2 * ATLAS:
+			return False
+		a = tex[n][0][..., 3]
+		shown = (a > 25).sum()
+		return bool(shown) and ((a > 25) & (a < 230)).sum() / shown >= 1.0 / 3.0
+
+	soft_names = [n for n in order if _soft(n)]
+	hard_names = [n for n in order if n not in soft_names]
+
+	def _fit(names, max_bins):
+		density = 2.0
+		while density > 0.05:
+			groups = _partition(names, tex, density, max_bins)
+			if groups:
+				return groups, density
+			density *= 0.98
+		return None, 0.0
+
+	soft_groups, soft_density = _fit(soft_names, SOFT_ATLASES) if soft_names else ([], 0.0)
+	hard_groups, density = _fit(hard_names, N_ATLAS - len(soft_groups or []))
+	if soft_groups is None or not hard_groups:
 		return None
 	atlases = []
 	table = {}
-	for ai, (sizes, pos) in enumerate(groups):
+	alpha_page = None
+	for ai, (sizes, pos) in enumerate(list(hard_groups) + list(soft_groups)):
+		soft = ai >= len(hard_groups)
 		atlas = np.zeros((ATLAS, ATLAS, 4), np.uint8)
 		for n, w, h in sizes:
 			x, y = pos[n]
@@ -181,15 +208,66 @@ def build(bsp_bytes: bytes, vpks, read_first) -> tuple[dict, list[np.ndarray]] |
 				"uv": [(x + 0.5) / ATLAS, (y + 0.5) / ATLAS, (x + w - 0.5) / ATLAS, (y + h - 0.5) / ATLAS],
 				"size": [tex[n][1], tex[n][2]],
 			}
+		if soft:
+			# The alpha leaves for its own page; the colour is spread into the
+			# clear texels so the blended edge keeps the paint's colour.
+			alpha_page = atlas[..., 3].copy()
+			atlas = _bleed(atlas)
 		atlases.append(atlas)
 	info = {
 		"atlas": ATLAS,
 		"names": [atlas_name(i) for i in range(len(atlases))],
+		"soft": [i for i in range(len(hard_groups), len(atlases))],
 		"density": density,
+		"soft_density": soft_density,
 		"tiles": table,
 		"decals": [{"origin": list(o), "texture": t} for o, t in decals if t in table],
 	}
-	return info, atlases
+	return info, atlases, alpha_page
+
+
+def _bleed(atlas: np.ndarray) -> np.ndarray:
+	"""Fill texels without alpha with the colour of the nearest paint, and
+	make the atlas opaque (its alpha is drawn from the separate page)."""
+	col = atlas[..., :3].astype(np.float64)
+	have = atlas[..., 3] > 0
+	for _ in range(ATLAS):
+		if have.all():
+			break
+		acc = np.zeros_like(col)
+		cnt = np.zeros(have.shape)
+		for dy, dx in ((0, 1), (0, -1), (1, 0), (-1, 0)):
+			sh = np.roll(have, (dy, dx), (0, 1))
+			sc = np.roll(col, (dy, dx), (0, 1))
+			acc += sc * sh[..., None]
+			cnt += sh
+		grow = ~have & (cnt > 0)
+		if not grow.any():
+			break
+		col[grow] = acc[grow] / cnt[grow][:, None]
+		have |= grow
+	out = np.zeros_like(atlas)
+	out[..., :3] = np.clip(col + 0.5, 0, 255).astype(np.uint8)
+	out[..., 3] = 255
+	return out
+
+
+def encode_i4(alpha: np.ndarray) -> bytes:
+	"""GX I4: 8x8 texel blocks, two texels a byte, high nibble first."""
+	h, w = alpha.shape
+	q = np.clip((alpha.astype(np.float64) / 17.0) + 0.5, 0, 15).astype(np.uint8)
+	out = bytearray()
+	for by in range(0, h, 8):
+		for bx in range(0, w, 8):
+			blk = q[by:by + 8, bx:bx + 8].reshape(-1)
+			out += bytes(((blk[0::2] << 4) | blk[1::2]).tolist())
+	return bytes(out)
+
+
+def write_alpha_page(path: Path, alpha: np.ndarray) -> None:
+	h, w = alpha.shape
+	path.parent.mkdir(parents=True, exist_ok=True)
+	path.write_bytes((b"GCda" + struct.pack(">HH", w, h)).ljust(32, b"\0") + encode_i4(alpha))
 
 
 def write_info(out_dir: Path, info: dict) -> None:

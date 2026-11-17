@@ -1715,18 +1715,27 @@ def bake(
 	decal_shorts = []
 	_dec = bake_infodecals.build(Path(map_bsp).read_bytes(), vpks, read_first) if full_geo else None
 	if _dec:
-		_dinfo, _datlases = _dec
+		_dinfo, _datlases, _dalpha = _dec
+		_da_path = out_dir / "media" / f"da_{Path(map_bsp).stem.lower()}.bin"
+		if _dalpha is not None:
+			bake_infodecals.write_alpha_page(_da_path, _dalpha)
+		else:
+			_da_path.unlink(missing_ok=True)
 		for _ai, _datlas in enumerate(_datlases):
 			_short = f"zdecalatlas{_ai}"
 			_name = bake_infodecals.atlas_name(_ai)
-			decal_shorts.append(_short)
+			_soft = _ai in _dinfo["soft"]
+			if not _soft:
+				decal_shorts.append(_short)
 			rgba_cache[_short] = (_datlas.tobytes(), bake_infodecals.ATLAS, bake_infodecals.ATLAS)
 			short_for_mat[_name] = _short
 			needed_mats.add(_name)
-			tevmat_feats[material_canonical(_name)] = {"flags": bake_tevmat.F_ALPHATEST | bake_tevmat.F_DECAL, "alpharef": 96}
+			tevmat_feats[material_canonical(_name)] = (
+				{"flags": bake_tevmat.F_DECAL | bake_tevmat.F_SOFT, "alpharef": 0} if _soft
+				else {"flags": bake_tevmat.F_ALPHATEST | bake_tevmat.F_DECAL, "alpharef": 96})
 		bake_infodecals.write_info(out_dir, _dinfo)
 		print(f"  infodecals: {len(_dinfo['decals'])} decals, {len(_dinfo['tiles'])} textures in {len(_datlases)} atlases of "
-			f"{bake_infodecals.ATLAS}x{bake_infodecals.ATLAS}, {_dinfo['density']:.2f} texels per unit")
+			f"{bake_infodecals.ATLAS}x{bake_infodecals.ATLAS}, {_dinfo['density']:.2f} texels per unit (soft paint atlas {_dinfo['soft_density']:.2f})")
 	# Encode WT pack — full-geo uses 128² CMPR chains in the GCT.
 	# MEM1 only keeps low mips / 8×8 stubs; R_GXHotService streams full
 	# chains from ARAM after CapFaces boot (sky 6×128 CMPR still fits tip).

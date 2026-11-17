@@ -49,6 +49,9 @@ F_ENVMASK = 0x04
 # $decal: the alpha is the decal's shape, so the cut-out also applies on
 # lightmapped surfaces (plain alpha-test materials only cut out when unlit).
 F_DECAL = 0x08
+# Soft decal: the atlas is opaque and its alpha is the separate I4 page
+# (media/da_<map>.bin); the engine blends instead of cutting out.
+F_SOFT = 0x10
 
 
 def _num(val: str | None, default: float) -> float:

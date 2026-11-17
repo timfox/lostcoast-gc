@@ -156,6 +156,11 @@ if [[ -f "$BAKE/media/ws_${MAP}.gcx" ]]; then
 	cp -a "$BAKE/media/ws_${MAP}.gcx" "$STAGE/media/"
 	echo "  + water sun ws_${MAP}.gcx"
 fi
+# Alpha page of the soft decal atlas (tools/bake_infodecals.py, written by the map bake).
+if [[ -f "$BAKE/media/da_${MAP}.bin" ]]; then
+	cp -a "$BAKE/media/da_${MAP}.bin" "$STAGE/media/"
+	echo "  + decal alpha da_${MAP}.bin"
+fi
 # The map's auto-exposure limits (tools/bake_lostcoast_tonemap.py).
 if [[ ! -f "$BAKE/media/tm_${MAP}.bin" || "$SCRIPT_DIR/../tools/bake_lostcoast_tonemap.py" -nt "$BAKE/media/tm_${MAP}.bin" ]]; then
 	python3 "$SCRIPT_DIR/../tools/bake_lostcoast_tonemap.py" --out "$BAKE" || true
