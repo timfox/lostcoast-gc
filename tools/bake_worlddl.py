@@ -838,6 +838,7 @@ def bake(map_bsp: Path, out_dir: Path, max_disp_power: int) -> None:
 	face_ctx: dict[int, tuple] = {}  # brush face → (cluster, lightmap cell, normal)
 	ground_tris: list = []  # upward-facing world triangles, for the water depth map
 	disp_light_records = []
+	disp_ctx: dict = {}  # displacement face -> (cluster, lightmap cell, vertex grid, side, face)
 
 	for fi in range(world_first, world_first + world_num):
 		f = bsp.faces[fi]
@@ -900,6 +901,7 @@ def bake(map_bsp: Path, out_dir: Path, max_disp_power: int) -> None:
 			samples = face_samples(bsp, f)
 			cell = ch.lm.alloc(f[13] + 1, f[14] + 1) if samples else None
 			DISP_CELLS.append((fi, cluster, cell[2] if cell else 0))
+			disp_ctx[fi] = (cluster, cell, grid, n, f)
 			if cell and samples:
 				ch.lm.blit(cell, samples)
 			edge_vertices = grid[0] + grid[-1] + [row[0] for row in grid] + [row[-1] for row in grid]
@@ -968,23 +970,118 @@ def bake(map_bsp: Path, out_dir: Path, max_disp_power: int) -> None:
 		face_ctx[fi] = (cluster, cell, nrm)
 		n_faces += 1
 
+	def emit_on_displacement(omat, hosts, org, bu, bv, quad_xy, quad_uv) -> int:
+		"""A decal or overlay whose host is a displacement: Source lays it over
+		the displaced surface. Every triangle of the host grids is clipped to
+		the decal's quad in the decal's own plane (x along bu, y along bv), and
+		what is left is drawn a unit above the surface with the surface's own
+		light. Returns the polygons emitted."""
+		# Affine map from the quad's plane to its texture coordinates (the
+		# quad is a parallelogram: corners 0, 1, 3 fix it).
+		(x0, y0), (x1, y1), (x3, y3) = quad_xy[0], quad_xy[1], quad_xy[3]
+		ax, ay, bx2, by2 = x1 - x0, y1 - y0, x3 - x0, y3 - y0
+		det = ax * by2 - ay * bx2
+		if abs(det) < 1e-6:
+			return 0
+		(u0, v0), (u1, v1), (u3, v3) = quad_uv[0], quad_uv[1], quad_uv[3]
+
+		def uv_at(x, y):
+			sx, sy = x - x0, y - y0
+			a2 = (sx * by2 - sy * bx2) / det
+			b3 = (ax * sy - ay * sx) / det
+			return u0 + (u1 - u0) * a2 + (u3 - u0) * b3, v0 + (v1 - v0) * a2 + (v3 - v0) * b3
+
+		edges = []
+		ccw = 1.0 if det > 0 else -1.0
+		for k in range(4):
+			(ex0, ey0), (ex1, ey1) = quad_xy[k], quad_xy[(k + 1) % 4]
+			edges.append((ex0, ey0, (ex1 - ex0) * ccw, (ey1 - ey0) * ccw))
+
+		def clip(poly):
+			for ex0, ey0, dx, dy in edges:
+				out = []
+				for i in range(len(poly)):
+					a2, b3 = poly[i], poly[(i + 1) % len(poly)]
+					da = dx * (a2[1] - ey0) - dy * (a2[0] - ex0)
+					db = dx * (b3[1] - ey0) - dy * (b3[0] - ex0)
+					if da >= 0:
+						out.append(a2)
+					if (da >= 0) != (db >= 0):
+						t = da / (da - db)
+						out.append(tuple(a2[c] + (b3[c] - a2[c]) * t for c in range(len(a2))))
+				poly = out
+				if len(poly) < 3:
+					return []
+			return poly
+
+		made = 0
+		for host in hosts:
+			cluster, cell, grid, n, hf = disp_ctx[host]
+			for j in range(n - 1):
+				for i in range(n - 1):
+					quad = (grid[j][i], grid[j][i + 1], grid[j + 1][i + 1], grid[j + 1][i])
+					for tri in ((quad[0], quad[1], quad[2]), (quad[0], quad[2], quad[3])):
+						poly = []
+						for pp, col, nrm, base in tri:
+							d = tuple(pp[c] - org[c] for c in range(3))
+							poly.append((
+								d[0] * bu[0] + d[1] * bu[1] + d[2] * bu[2],
+								d[0] * bv[0] + d[1] * bv[1] + d[2] * bv[2],
+								pp[0], pp[1], pp[2], nrm[0], nrm[1], nrm[2], base[0], base[1], base[2],
+								float(col[0]), float(col[1]), float(col[2])))
+						poly = clip(poly)
+						if not poly:
+							continue
+						verts = []
+						for v in poly:
+							nl = math.sqrt(v[5] * v[5] + v[6] * v[6] + v[7] * v[7]) or 1.0
+							nrm = (v[5] / nl, v[6] / nl, v[7] / nl)
+							pt = (v[2] + nrm[0], v[3] + nrm[1], v[4] + nrm[2])
+							lu, lv = (0.0, 0.0)
+							if cell:
+								sl, tl, lw, lh = luxel_uv(bsp, hf, (v[8], v[9], v[10]))
+								lu, lv = cell_st(cell, max(0.0, min(lw - 1.0, sl)), max(0.0, min(lh - 1.0, tl)), lw, lh)
+							cu, cv = uv_at(v[0], v[1])
+							verts.append((pt, (int(v[11]), int(v[12]), int(v[13]), 255), nrm, cu, cv, lu, lv))
+						# Wind like the surface triangle it lies on.
+						chunks[cluster].emit(omat, GX_DRAW_TRIFAN, verts)
+						made += 1
+		return made
+
 	# --- Overlays (lump 45): graffiti, plaster and trash decals -----------------
 	# doverlay_t, 352 bytes: id, texinfo, face count, 64 face ids, U[2], V[2],
 	# UVPoints[4] (xy = corner in basis space, z of the first three = BasisU),
-	# origin, basis normal. Each becomes one quad a unit off its host face,
-	# lit by that face's lightmap cell. Hosts on displacements are skipped:
-	# a flat quad does not follow the sand.
+	# origin, basis normal. On a brush face each becomes one quad a unit off
+	# its host, lit by that face's lightmap cell. On a displacement it is cut
+	# to the displaced triangles it covers (emit_on_displacement).
 	n_overlays = 0
+	n_overlays_disp = 0
 	oo, ol = struct.unpack_from("<ii", bsp.data, 8 + 45 * 16)
 	for oi in range(ol // 352):
 		r = bsp.data[oo + oi * 352:oo + (oi + 1) * 352]
 		_oid, oti, ofc = struct.unpack_from("<ihH", r, 0)
-		hosts = [h for h in struct.unpack_from("<64i", r, 8)[:ofc & 0x3FFF] if h in face_ctx]
-		if not hosts or not (0 <= oti < len(bsp.texinfos)):
+		all_hosts = struct.unpack_from("<64i", r, 8)[:ofc & 0x3FFF]
+		hosts = [h for h in all_hosts if h in face_ctx]
+		disp_hosts = [h for h in all_hosts if h in disp_ctx]
+		if not (hosts or disp_hosts) or not (0 <= oti < len(bsp.texinfos)):
 			continue
 		oti_rec = bsp.texinfos[oti]
 		omat = mat_for(oti_rec[5], oti_rec[4])
 		if omat is None:
+			continue
+		if not hosts:
+			_U = struct.unpack_from("<2f", r, 264)
+			_V = struct.unpack_from("<2f", r, 272)
+			_uvp = struct.unpack_from("<12f", r, 280)
+			_org = struct.unpack_from("<3f", r, 328)
+			_bn = struct.unpack_from("<3f", r, 340)
+			_bu = (_uvp[2], _uvp[5], _uvp[8])
+			_bv = (_bn[1] * _bu[2] - _bn[2] * _bu[1], _bn[2] * _bu[0] - _bn[0] * _bu[2], _bn[0] * _bu[1] - _bn[1] * _bu[0])
+			if emit_on_displacement(omat, disp_hosts, _org, _bu, _bv,
+					[(_uvp[k * 3], _uvp[k * 3 + 1]) for k in range(4)],
+					[(_U[0], _V[0]), (_U[0], _V[1]), (_U[1], _V[1]), (_U[1], _V[0])]):
+				n_overlays += 1
+				n_overlays_disp += 1
 			continue
 		U = struct.unpack_from("<2f", r, 264)
 		V = struct.unpack_from("<2f", r, 272)
@@ -1008,7 +1105,7 @@ def bake(map_bsp: Path, out_dir: Path, max_disp_power: int) -> None:
 			verts.append((pt, light_at(bsp, hf, pt) + (255,), hn, corner_uv[k][0], corner_uv[k][1], lu, lv))
 		chunks[cluster].emit(omat, GX_DRAW_TRIFAN, verts)
 		n_overlays += 1
-	print(f"  overlays baked: {n_overlays}/{ol // 352}")
+	print(f"  overlays baked: {n_overlays}/{ol // 352} ({n_overlays_disp} on displacements)")
 
 	# --- infodecals (tools/bake_infodecals.py) --------------------------------
 	# Source projects each infodecal onto the surface it sits on when the map
@@ -1017,6 +1114,7 @@ def bake(map_bsp: Path, out_dir: Path, max_disp_power: int) -> None:
 	# up = world up on the plane (X axis on level ground); one alpha-tested quad
 	# a unit off the host, lit by the host's lightmap, from its atlas.
 	n_decals = 0
+	n_decals_disp = 0
 	dec_path = out_dir / "infodecals.json"
 	dinfo = json.loads(dec_path.read_text()) if dec_path.is_file() else None
 	if dinfo and all(n in names for n in dinfo.get("names", [None])):
@@ -1046,6 +1144,58 @@ def bake(map_bsp: Path, out_dir: Path, max_disp_power: int) -> None:
 				if not (pos and neg):
 					best = (abs(dist), fi, pr, pts)
 			if not best:
+				# Not on a brush face: the displaced surface under it. Host =
+				# the nearest displacement triangle the origin projects into
+				# (within 24 units along the triangle's normal).
+				dbest = None
+				for dfi, (_cl, _cell, dgrid, dn, _df) in disp_ctx.items():
+					for j in range(dn - 1):
+						for i in range(dn - 1):
+							q = (dgrid[j][i][0], dgrid[j][i + 1][0], dgrid[j + 1][i + 1][0], dgrid[j + 1][i][0])
+							for t3 in ((q[0], q[1], q[2]), (q[0], q[2], q[3])):
+								e1 = tuple(t3[1][c] - t3[0][c] for c in range(3))
+								e2 = tuple(t3[2][c] - t3[0][c] for c in range(3))
+								tn = (e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0])
+								tl = math.sqrt(sum(c * c for c in tn))
+								if tl < 1e-6:
+									continue
+								tn = tuple(c / tl for c in tn)
+								dist = sum((org[c] - t3[0][c]) * tn[c] for c in range(3))
+								if abs(dist) > 24.0 or (dbest and abs(dist) >= dbest[0]):
+									continue
+								pr = tuple(org[c] - tn[c] * dist for c in range(3))
+								inside = True
+								for k in range(3):
+									a0, b0 = t3[k], t3[(k + 1) % 3]
+									e = tuple(b0[c] - a0[c] for c in range(3))
+									w2 = tuple(pr[c] - a0[c] for c in range(3))
+									cx = (e[1] * w2[2] - e[2] * w2[1], e[2] * w2[0] - e[0] * w2[2], e[0] * w2[1] - e[1] * w2[0])
+									if sum(cx[c] * tn[c] for c in range(3)) < -0.5:
+										inside = False
+										break
+								if inside:
+									dbest = (abs(dist), pr, tn if tn[2] >= 0 else tuple(-c for c in tn))
+				if not dbest:
+					continue
+				_d, ctr, hn = dbest
+				upv = (0.0, 1.0, 0.0) if abs(hn[2]) > 0.99 else (0.0, 0.0, 1.0)
+				rgt = (upv[1] * hn[2] - upv[2] * hn[1], upv[2] * hn[0] - upv[0] * hn[2], upv[0] * hn[1] - upv[1] * hn[0])
+				rl = math.sqrt(sum(c * c for c in rgt)) or 1.0
+				rgt = tuple(c / rl for c in rgt)
+				upv = (hn[1] * rgt[2] - hn[2] * rgt[1], hn[2] * rgt[0] - hn[0] * rgt[2], hn[0] * rgt[1] - hn[1] * rgt[0])
+				hw, hh = tile["size"][0] * 0.5, tile["size"][1] * 0.5
+				u0, v0, u1, v1 = tile["uv"]
+				reach = math.hypot(hw, hh)
+				near = [dfi for dfi, (_cl, _cell, dgrid, dn, _df) in disp_ctx.items()
+					if any(abs(dgrid[jj][ii][0][0] - ctr[0]) < reach + 1 and abs(dgrid[jj][ii][0][1] - ctr[1]) < reach + 1
+						for jj in (0, dn - 1) for ii in (0, dn - 1))
+					or (min(g[0][0] for row in dgrid for g in row) <= ctr[0] <= max(g[0][0] for row in dgrid for g in row)
+						and min(g[0][1] for row in dgrid for g in row) <= ctr[1] <= max(g[0][1] for row in dgrid for g in row))]
+				if emit_on_displacement(dmats[tile["atlas"]], near, ctr, rgt, upv,
+						[(-hw, hh), (-hw, -hh), (hw, -hh), (hw, hh)],
+						[(u0, v0), (u0, v1), (u1, v1), (u1, v0)]):
+					n_decals += 1
+					n_decals_disp += 1
 				continue
 			_d, host, ctr, hpts = best
 			cluster, cell, hn = face_ctx[host]
@@ -1080,7 +1230,7 @@ def bake(map_bsp: Path, out_dir: Path, max_disp_power: int) -> None:
 				quad = [quad[0], quad[3], quad[2], quad[1]]
 			chunks[cluster].emit(dmats[tile["atlas"]], GX_DRAW_TRIFAN, quad)
 			n_decals += 1
-		print(f"  infodecals baked: {n_decals}/{len(dinfo['decals'])}")
+		print(f"  infodecals baked: {n_decals}/{len(dinfo['decals'])} ({n_decals_disp} on displacements)")
 
 	seam_pairs, seam_texels, seam_vertices = stitch_displacement_lightmaps(bsp, disp_light_records)
 	print(f"  displacement lighting seams softened: {seam_pairs} edges, {seam_texels} texels, {seam_vertices} vertices")
