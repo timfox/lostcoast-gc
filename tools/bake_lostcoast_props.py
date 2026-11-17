@@ -28,7 +28,7 @@ from vtf import decode_vtf  # noqa: E402
 GC_PR_MAGIC = b"GCpr"
 GC_PR_VERSION = 7
 GC_PR_MAX_TRIS = 65535
-GC_PR_MODEL_TRIS = 105000  # unique model triangles (30 B each in ARAM)
+GC_PR_MODEL_TRIS = 112000  # unique model triangles (about 23 B each in ARAM; 2.6 MB of the 16)
 GC_PR_CMD_VERTS = 1200   # vertices in one draw command (even)
 GC_PR_PIECE_BYTES = 15360  # piece body cap; header + body fit the 16 KB bounce
 
@@ -1177,6 +1177,11 @@ def bake_props(
 				continue
 			d = float(np.sqrt(((node_arr - np.array(origin)) ** 2).sum(axis=1)).min())
 			reach[model] = min(reach.get(model, 1e9), d)
+		# First pass: every candidate with its range. A prop Source gives no
+		# LODs (the monastery pillars, gutters, altar) has no switch point:
+		# Source draws it whole at any distance. Those take the median range
+		# of the props that do have one.
+		cands = []
 		for model in sorted(reach, key=lambda m: (reach[m], m)):
 			mesh, ids = model_cache[model]
 			mdl = read_first(vpks, model)
@@ -1188,17 +1193,23 @@ def bake_props(
 				switch = lod_switch_point(vtx, 1)
 			except Exception:  # noqa: BLE001
 				continue
-			if switch is None or len(full.tris) <= len(mesh.tris):
+			if len(full.tris) <= len(mesh.tris) or len(full.tris) > CLOSE_MAX_TRIS:
 				continue
-			if len(full.tris) > CLOSE_MAX_TRIS or len(full.tris) > spare:
+			cands.append((model, full, switch))
+		ranges = sorted(sw * LOD_UNITS_PER_METRIC for _m, _f, sw in cands if sw is not None)
+		median_range = ranges[len(ranges) // 2] if ranges else 0.0
+		for model, full, switch in cands:
+			mesh, ids = model_cache[model]
+			if len(full.tris) > spare:
 				continue
-			dist = switch * LOD_UNITS_PER_METRIC
-			if reach[model] > dist:
-				continue  # the player never gets inside its LOD 0 range
+			dist = switch * LOD_UNITS_PER_METRIC if switch is not None else median_range
+			if dist <= 0.0 or reach[model] > dist:
+				continue  # the player never gets inside its range
 			close_models[model] = (full, dist)
 			spare -= len(full.tris)
 			print(f"  close model {model}: {len(mesh.tris)} → {len(full.tris)} tris inside {dist:.0f} units "
-				f"($lod {switch:g}; {reach[model]:.0f} units from the nearest node)")
+				+ (f"($lod {switch:g}" if switch is not None else "(no LODs: median range")
+				+ f"; {reach[model]:.0f} units from the nearest node)")
 		print(f"  close models: {len(close_models)}; {spare} tris of the budget left")
 
 	# ---- pack v3: models once, instances carry origin + angles ----
