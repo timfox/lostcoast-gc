@@ -1019,6 +1019,13 @@ def bake(map_bsp: Path, out_dir: Path, max_disp_power: int) -> None:
 				if w0 < -0.02 or w1 < -0.02 or w2 < -0.02:
 					continue
 				z = w0 * a[2] + w1 * b2[2] + w2 * c[2]
+				# Not the harbor bed: the map has floors thousands of units
+				# down (under the 3D skybox, z = -5144). Where the beach rises
+				# just above the waterline such a floor became the "seabed"
+				# of the cell, and the sheet drew full-depth dark water over
+				# dry sand in hard-edged patches.
+				if z < WATER_Z - 1024.0:
+					continue
 				cur = ground[gy][gx]
 				# The seabed is the highest surface at or below the waterline;
 				# anything above it (a pier deck, a cliff) is not the bed.
