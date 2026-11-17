@@ -86,6 +86,12 @@ def classify(vmt: dict[str, str] | None) -> dict | None:
 	if _num(vmt.get("$alphatest"), 0.0) >= 1.0:
 		out["flags"] |= F_ALPHATEST
 		out["alpharef"] = int(max(1, min(255, round(_num(vmt.get("$alphatestreference"), 0.5) * 255))))
+	# $translucent brush textures (the Combine grate, the monastery rail)
+	# blend by alpha in Source. The world DL has one opaque pass, so they cut
+	# out at half alpha instead of drawing as a solid sheet.
+	if _num(vmt.get("$translucent"), 0.0) >= 1.0 and not out["flags"] & F_ALPHATEST:
+		out["flags"] |= F_ALPHATEST
+		out["alpharef"] = 128
 	# Overlay decals (graffiti, rubble, trash) blend by alpha in Source. The
 	# world DL has one opaque pass, so they cut out at 1-bit alpha instead.
 	if _num(vmt.get("$decal"), 0.0) >= 1.0:
@@ -362,6 +368,7 @@ def build_table(
 		)
 
 	ids: dict[str, int] = {}
+	rec_ids: dict[bytes, int] = {}
 	recs = bytearray()
 	for mat in sorted(mat_features):
 		feat = mat_features[mat]
@@ -382,15 +389,22 @@ def build_table(
 				flags &= ~F_ENVMASK
 		if not flags:
 			continue
-		if len(ids) >= GC_TEVMAT_MAX_MATS:
-			log.append(f"  tevmat: {mat} dropped (>{GC_TEVMAT_MAX_MATS} materials)")
-			continue
-		ids[mat] = len(ids) + 1
 		# flags, detail idx, detail scale u16, alpharef, envmask idx, pad2
-		recs += struct.pack(
+		rec = struct.pack(
 			">BBHBB2x", flags, didx, scale, feat.get("alpharef", 0), maskidx
 		)
-	hdr = GC_TEVMAT_MAGIC + struct.pack(">HBB", GC_TEVMAT_VERSION, len(ids), len(detail_blobs))
+		# Materials with the same recipe share one record: the cubemap
+		# patches of one texture (name_x_y_z) would otherwise fill the table
+		# and push later materials out, alpha-tested grates among them.
+		if rec in rec_ids:
+			ids[mat] = rec_ids[rec]
+			continue
+		if len(rec_ids) >= GC_TEVMAT_MAX_MATS:
+			log.append(f"  tevmat: {mat} dropped (>{GC_TEVMAT_MAX_MATS} recipes)")
+			continue
+		rec_ids[rec] = ids[mat] = len(rec_ids) + 1
+		recs += rec
+	hdr = GC_TEVMAT_MAGIC + struct.pack(">HBB", GC_TEVMAT_VERSION, len(rec_ids), len(detail_blobs))
 	head = hdr + bytes(recs)
 	head += b"\0" * ((-len(head)) % 32)
 	body = head + b"".join(detail_blobs)

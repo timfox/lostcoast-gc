@@ -681,6 +681,22 @@ def _env_material(vpks, vmt_raw: bytes):
 	return rgba.tobytes(), img.width, img.height, tint
 
 
+def _alphatest_ref(vmt: bytes | None) -> float | None:
+	"""Source $alphatest: the reference alpha, or None when the material does
+	not test. Without $alphatestreference Source tests at its default, 0.7."""
+	if not vmt:
+		return None
+	from vmt import load_vmt
+	m = load_vmt(vmt)
+	try:
+		if float(m.get("$alphatest", "0") or 0) < 1.0:
+			return None
+		ref = float(m.get("$alphatestreference", "0") or 0)
+	except ValueError:
+		return None
+	return ref if ref > 0.0 else 0.7
+
+
 def _additive_vmt(vmt: bytes) -> bool:
 	"""Source $additive. The stained-glass shafts live in this mode."""
 	lines = []
@@ -929,7 +945,7 @@ def bake_props(
 	mat_of: dict[str, int] = {}
 	chains: list[tuple[str, int, int, int, int, int, bytes]] = []
 
-	def ensure_mat(key: str, rgba: bytes, w: int, h: int, side: int, label: str) -> int:
+	def ensure_mat(key: str, rgba: bytes, w: int, h: int, side: int, label: str, alpha_ref: float | None = None) -> int:
 		if key in mat_of:
 			return mat_of[key]
 		if len(chains) >= GC_PR_MAX_MAT:
@@ -945,9 +961,19 @@ def bake_props(
 				(side_px, side_px), Image.Resampling.BICUBIC,
 			).tobytes()
 			w = h = side_px
-		tw, th, lv, body = rgba_to_cmpr_mips(rgba, w, h, False, max_side=side)
+		if alpha_ref is not None:
+			# Source $alphatest: a texel is drawn when its alpha reaches the
+			# material's reference. CMPR holds one alpha bit, set at 128, so
+			# the alpha is rescaled to put the reference there. Entry flag 1
+			# tells the engine to test it.
+			import numpy as np
+
+			arr = np.frombuffer(rgba, dtype=np.uint8).reshape(h, w, 4).astype(np.float64)
+			arr[..., 3] = np.clip(arr[..., 3] * (128.0 / max(1.0, alpha_ref * 255.0)), 0, 255)
+			rgba = arr.astype(np.uint8).tobytes()
+		tw, th, lv, body = rgba_to_cmpr_mips(rgba, w, h, alpha_ref is not None, max_side=side)
 		name = f"p{len(chains):03d}"
-		chains.append((name, tw, th, lv, 0, 0, body))
+		chains.append((name, tw, th, lv, 1 if alpha_ref is not None else 0, 0, body))
 		mat_of[key] = len(chains) - 1
 		print(f"  mat {name} {label} {tw}x{th} lv={lv} {len(body)}B")
 		return mat_of[key]
@@ -987,6 +1013,7 @@ def bake_props(
 			idx = ensure_mat(
 				rel, rgba, w, h, _max_side(model, name),
 				f"{name} ← {rel}",
+				alpha_ref=None if skipped else _alphatest_ref(vmt),
 			)
 			# $envmap with the mask in the normal map's alpha (the coast rocks):
 			# the engine adds ( cubemap x tint x mask )^2 over the piece, the
