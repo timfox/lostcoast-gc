@@ -1720,7 +1720,7 @@ def bake(
 		rgba_cache[decal_short] = (_datlas.tobytes(), bake_infodecals.ATLAS, bake_infodecals.ATLAS)
 		short_for_mat[bake_infodecals.ATLAS_NAME] = decal_short
 		needed_mats.add(bake_infodecals.ATLAS_NAME)
-		tevmat_feats[material_canonical(bake_infodecals.ATLAS_NAME)] = {"flags": bake_tevmat.F_ALPHATEST, "alpharef": 96}
+		tevmat_feats[material_canonical(bake_infodecals.ATLAS_NAME)] = {"flags": bake_tevmat.F_ALPHATEST | bake_tevmat.F_DECAL, "alpharef": 96}
 		bake_infodecals.write_info(out_dir, _dinfo)
 		print(f"  infodecals: {len(_dinfo['decals'])} decals, {len(_dinfo['tiles'])} textures in one {bake_infodecals.ATLAS}x{bake_infodecals.ATLAS} atlas")
 	# Encode WT pack — full-geo uses 128² CMPR chains in the GCT.

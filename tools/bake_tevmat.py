@@ -46,6 +46,9 @@ GC_TEVMAT_ENVMASK_MAGIC = b"GCem"
 F_DETAIL = 0x01
 F_ALPHATEST = 0x02
 F_ENVMASK = 0x04
+# $decal: the alpha is the decal's shape, so the cut-out also applies on
+# lightmapped surfaces (plain alpha-test materials only cut out when unlit).
+F_DECAL = 0x08
 
 
 def _num(val: str | None, default: float) -> float:
@@ -85,9 +88,11 @@ def classify(vmt: dict[str, str] | None) -> dict | None:
 		out["alpharef"] = int(max(1, min(255, round(_num(vmt.get("$alphatestreference"), 0.5) * 255))))
 	# Overlay decals (graffiti, rubble, trash) blend by alpha in Source. The
 	# world DL has one opaque pass, so they cut out at 1-bit alpha instead.
-	if _num(vmt.get("$decal"), 0.0) >= 1.0 and not out["flags"] & F_ALPHATEST:
-		out["flags"] |= F_ALPHATEST
-		out["alpharef"] = 96
+	if _num(vmt.get("$decal"), 0.0) >= 1.0:
+		out["flags"] |= F_DECAL
+		if not out["flags"] & F_ALPHATEST:
+			out["flags"] |= F_ALPHATEST
+			out["alpharef"] = 96
 	env = (vmt.get("$envmap") or "").strip().lower()
 	if env and env not in ("0", '""', "none"):
 		# Lost Coast rocks and wet sand put the reflection mask in the normal
