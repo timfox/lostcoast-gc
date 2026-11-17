@@ -12,9 +12,10 @@ Every number comes from the game data:
     (particle/fire_burning_character/fire_env_fire.vmt), cut by the VTF's
     sheet resource.
 
-In the map these fires start off: the headcrab canister templates turn them
-on five seconds after a canister lands, together with the smoke columns the
-port already draws. They are baked for that same bombarded state.
+Only fires that are on at load (spawnflag 4, start on) are baked. The six
+town fires of d2_lostcoast start off: the headcrab canister templates turn
+them on five seconds after a canister lands, so the level-start state the
+port shows has none.
 
 Memory compromise (not a look choice): every second frame of each sequence
 is kept, in 32x32 cells of one 256x256 CMPR atlas (32 KB). The texture is
@@ -120,11 +121,23 @@ def main() -> None:
 	for kv in entities(args.map.read_bytes()):
 		if kv.get("classname") != "env_fire":
 			continue
+		# The map's state at load: spawnflag 4 is "start on". The six town
+		# fires (spawnflags 176) are started by the canister templates later
+		# in the level.
+		if not int(kv.get("spawnflags", "0") or 0) & 4:
+			print(f"  env_fire {kv.get('targetname', '-')}: off at load, not baked")
+			continue
 		size = float(kv.get("firesize", "64") or 64)
 		if int(size // 36) < 3:
 			print(f"  env_fire {kv.get('targetname', '-')}: firesize {size} is not env_fire_large, skipped")
 			continue
 		fires.append(tuple(float(v) for v in kv["origin"].split()))
+	out = args.out / "media" / f"fi_{args.map.stem.lower()}.gcf"
+	if not fires:
+		# Nothing burns at load: no file, so the engine does not hold the atlas.
+		out.unlink(missing_ok=True)
+		print(f"  no env_fire is on at load: {out.name} not written")
+		return
 	systems = source_pcf.systems(read_first(vpks, "particles/fire_01.pcf"))
 	main_sys = systems["env_fire_large"]
 	layers_src = [main_sys] + [c["child"] for c in main_sys.get("children", []) if c["child"]["_name"] == "env_fire_large_b"]

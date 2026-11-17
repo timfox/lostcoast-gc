@@ -36,6 +36,13 @@ def main() -> None:
 	for kv in entities(args.map.read_bytes()):
 		if kv.get("classname") != "env_smokestack":
 			continue
+		# The map's state at load: a stack whose InitialState is 0 (or absent)
+		# is off until something turns it on. The six smoke_canister stacks
+		# are turned on by the headcrab canister templates later in the
+		# level, and the retail cove shot at level start shows none.
+		if (kv.get("InitialState", "0") or "0").strip() in ("0", ""):
+			print(f"  smokestack {kv.get('targetname', '-')}: off at load, not baked")
+			continue
 		org = [float(v) for v in kv.get("origin", "0 0 0").split()]
 		rgb = [int(float(v)) for v in kv.get("rendercolor", "255 255 255").split()][:3]
 		num = lambda k, d: float(kv.get(k, d) or d)
