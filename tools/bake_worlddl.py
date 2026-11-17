@@ -1015,12 +1015,12 @@ def bake(map_bsp: Path, out_dir: Path, max_disp_power: int) -> None:
 	# loads. Host = brush face whose plane holds the origin (within 16 units)
 	# and whose polygon contains it. Size = texture pixels x $decalscale, image
 	# up = world up on the plane (X axis on level ground); one alpha-tested quad
-	# a unit off the host, lit by the host's lightmap, from the shared atlas.
+	# a unit off the host, lit by the host's lightmap, from its atlas.
 	n_decals = 0
 	dec_path = out_dir / "infodecals.json"
-	if dec_path.is_file() and "lostcoast/decals/atlas" in names:
-		dinfo = json.loads(dec_path.read_text())
-		dmat = mat_named("lostcoast/decals/atlas")
+	dinfo = json.loads(dec_path.read_text()) if dec_path.is_file() else None
+	if dinfo and all(n in names for n in dinfo.get("names", [None])):
+		dmats = [mat_named(n) for n in dinfo["names"]]
 		for dec in dinfo["decals"]:
 			org = tuple(dec["origin"])
 			tile = dinfo["tiles"][dec["texture"]]
@@ -1078,7 +1078,7 @@ def bake(map_bsp: Path, out_dir: Path, max_disp_power: int) -> None:
 				return cr[0] * hn[0] + cr[1] * hn[1] + cr[2] * hn[2]
 			if _wind([v[0] for v in quad]) * _wind(hpts) < 0:
 				quad = [quad[0], quad[3], quad[2], quad[1]]
-			chunks[cluster].emit(dmat, GX_DRAW_TRIFAN, quad)
+			chunks[cluster].emit(dmats[tile["atlas"]], GX_DRAW_TRIFAN, quad)
 			n_decals += 1
 		print(f"  infodecals baked: {n_decals}/{len(dinfo['decals'])}")
 

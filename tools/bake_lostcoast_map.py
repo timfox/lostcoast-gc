@@ -1709,20 +1709,24 @@ def bake(
 	if envmap_mats:
 		print(f"  CapFaces envmap/specular mats: {len(envmap_mats)}")
 
-	# infodecal atlas (tools/bake_infodecals.py): all decals share one pack entry
-	# (the pack is at its slot budget). Placement lives in infodecals.json.
+	# infodecal atlases (tools/bake_infodecals.py): the decal textures share a
+	# few pack entries. Placement lives in infodecals.json.
 	import bake_infodecals
-	decal_short = None
+	decal_shorts = []
 	_dec = bake_infodecals.build(Path(map_bsp).read_bytes(), vpks, read_first) if full_geo else None
 	if _dec:
-		_dinfo, _datlas = _dec
-		decal_short = "zdecalatlas"
-		rgba_cache[decal_short] = (_datlas.tobytes(), bake_infodecals.ATLAS, bake_infodecals.ATLAS)
-		short_for_mat[bake_infodecals.ATLAS_NAME] = decal_short
-		needed_mats.add(bake_infodecals.ATLAS_NAME)
-		tevmat_feats[material_canonical(bake_infodecals.ATLAS_NAME)] = {"flags": bake_tevmat.F_ALPHATEST | bake_tevmat.F_DECAL, "alpharef": 96}
+		_dinfo, _datlases = _dec
+		for _ai, _datlas in enumerate(_datlases):
+			_short = f"zdecalatlas{_ai}"
+			_name = bake_infodecals.atlas_name(_ai)
+			decal_shorts.append(_short)
+			rgba_cache[_short] = (_datlas.tobytes(), bake_infodecals.ATLAS, bake_infodecals.ATLAS)
+			short_for_mat[_name] = _short
+			needed_mats.add(_name)
+			tevmat_feats[material_canonical(_name)] = {"flags": bake_tevmat.F_ALPHATEST | bake_tevmat.F_DECAL, "alpharef": 96}
 		bake_infodecals.write_info(out_dir, _dinfo)
-		print(f"  infodecals: {len(_dinfo['decals'])} decals, {len(_dinfo['tiles'])} textures in one {bake_infodecals.ATLAS}x{bake_infodecals.ATLAS} atlas")
+		print(f"  infodecals: {len(_dinfo['decals'])} decals, {len(_dinfo['tiles'])} textures in {len(_datlases)} atlases of "
+			f"{bake_infodecals.ATLAS}x{bake_infodecals.ATLAS}, {_dinfo['density']:.2f} texels per unit")
 	# Encode WT pack — full-geo uses 128² CMPR chains in the GCT.
 	# MEM1 only keeps low mips / 8×8 stubs; R_GXHotService streams full
 	# chains from ARAM after CapFaces boot (sky 6×128 CMPR still fits tip).
@@ -1764,8 +1768,7 @@ def bake(
 		and tevmat_feats.get(material_canonical(m), {}).get("flags", 0)
 		& bake_tevmat.F_ALPHATEST
 	}
-	if decal_short:
-		alphatest_shorts.add(decal_short)
+	alphatest_shorts.update(decal_shorts)
 	for short, (rgba, w, h) in sorted(rgba_cache.items()):
 		alpha = short in alphatest_shorts
 		# Sand and blend layers are the surfaces the eye lingers on: 256² (ARAM
