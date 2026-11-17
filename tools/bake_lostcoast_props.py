@@ -1076,6 +1076,20 @@ def bake_props(
 	inst_blob = bytearray()
 	n_inst = 0
 	inst_tris = 0
+	# Static prop lighting, as Source computes it for a prop without baked
+	# vertex light (this map has none: no .vhv in the pak): the ambient cube
+	# of the leaf at the prop's centre plus the light_environment sun when a
+	# ray from there reaches the sky (tools/source_lightcache.py). The pack
+	# has one colour per instance and no normals, so the colour is that
+	# lighting averaged over every surface direction: the mean of the six
+	# cube faces, plus a quarter of the sun (the mean of max(0, N.L) over a
+	# sphere). Before this the engine took the lightmap of the ground under
+	# the prop, so a rock on sunlit sand was lit as if every face faced the
+	# sun. Texel = gamma(light x exposure), the world's curve at x1.
+	from source_lightcache import LightCache, lighting_at
+	from bake_worlddl import LIGHT_EXPOSURE
+	_lc = LightCache(Path(map_bsp))
+	n_sunlit = 0
 	for model, origin, angles in props:
 		got = mesh_for(model)
 		if got is None:
@@ -1095,13 +1109,20 @@ def bake_props(
 				maxs[axis] = max(maxs[axis], wp[axis])
 		c16 = lambda v: int(max(-32767, min(32767, round(v))))
 		a16 = lambda d: ((int(round(d * 65536.0 / 360.0)) + 32768) & 0xFFFF) - 32768
+		_ctr = tuple(0.5 * (mins[k] + maxs[k]) for k in range(3))
+		_cube, _sun, _sdir = lighting_at(_lc, _ctr, height=0.0)
+		_lit = [sum(f[k] for f in _cube) / 6.0 + (0.25 * _sun[k] if _sun else 0.0) for k in range(3)]
+		n_sunlit += 1 if _sun else 0
+		_tex = [min(255, int(255.0 * pow(max(0.0, v) * LIGHT_EXPOSURE, 1.0 / 2.2) + 0.5)) for v in _lit]
+		# Low byte 1 marks the colour as set (the engine's own sample otherwise).
+		inst_lit = (_tex[0] << 24) | (_tex[1] << 16) | (_tex[2] << 8) | 1
 		inst_blob += struct.pack(
 			">HH3h3h3h3hI",
 			mi, min(65535, model_recs[mi][2]),
 			*[c16(math.floor(v)) for v in mins], *[c16(math.ceil(v)) for v in maxs],
 			*[c16(v) for v in origin],
 			a16(pitch), a16(yaw), a16(roll),
-			0,
+			inst_lit,
 		)
 		n_inst += 1
 		inst_tris += model_recs[mi][2]
