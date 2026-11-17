@@ -26,11 +26,80 @@ from vpk import open_vpk_roots, read_first  # noqa: E402
 from vtf import decode_vtf  # noqa: E402
 
 GC_PR_MAGIC = b"GCpr"
-GC_PR_VERSION = 6
+GC_PR_VERSION = 7
 GC_PR_MAX_TRIS = 65535
 GC_PR_MODEL_TRIS = 105000  # unique model triangles (30 B each in ARAM)
 GC_PR_CMD_VERTS = 1200   # vertices in one draw command (even)
 GC_PR_PIECE_BYTES = 15360  # piece body cap; header + body fit the 16 KB bounce
+
+
+def oct_normal_table():
+	"""The 256 unit directions a prop vertex normal can take: a 16 x 16
+	octahedral grid. The engine builds the same table (r_gx_world.c)."""
+	import numpy as np
+	c = (np.arange(16) + 0.5) / 16.0 * 2.0 - 1.0
+	u, v = np.meshgrid(c, c)  # index = row * 16 + column, u along the column
+	z = 1.0 - np.abs(u) - np.abs(v)
+	x = np.where(z < 0.0, (1.0 - np.abs(v)) * np.sign(u), u)
+	y = np.where(z < 0.0, (1.0 - np.abs(u)) * np.sign(v), v)
+	n = np.stack([x, y, z], -1).reshape(-1, 3)
+	return n / np.linalg.norm(n, axis=1, keepdims=True)
+
+
+def _corner_normal_ids(pts, tris):
+	"""Normal table index for every triangle corner (3 per triangle).
+
+	The meshes come through posing and decimation without their VVD
+	normals, so the normals are rebuilt from the geometry: a corner takes
+	the area-weighted mean of the faces around its position that lie within
+	45 degrees of its own face, which keeps a crate's edges hard and a
+	rock's surface smooth."""
+	import numpy as np
+	if not tris:
+		return []
+	P = np.asarray(pts, dtype=np.float64)
+	T = np.asarray(tris, dtype=np.int64)
+	fn = np.cross(P[T[:, 1]] - P[T[:, 0]], P[T[:, 2]] - P[T[:, 0]])  # length = 2 x area
+	ln = np.linalg.norm(fn, axis=1, keepdims=True)
+	unit = fn / np.maximum(ln, 1e-12)
+	keys = {}
+	for ti, tri in enumerate(tris):
+		for i in tri:
+			keys.setdefault(tuple(round(c, 2) for c in pts[i]), []).append(ti)
+	# Around each position the faces fall into smoothing clusters: faces
+	# linked by a chain of neighbours within 45 degrees. One normal per
+	# cluster, so every corner of a smooth patch shares its vertex and the
+	# triangle strips survive.
+	out = np.zeros((len(tris) * 3, 3))
+	corner_of = {}
+	for ti, tri in enumerate(tris):
+		for k, i in enumerate(tri):
+			corner_of[(ti, tuple(round(c, 2) for c in pts[i]))] = ti * 3 + k
+	for key, nb in keys.items():
+		parent = list(range(len(nb)))
+		def find(a):
+			while parent[a] != a:
+				parent[a] = parent[parent[a]]
+				a = parent[a]
+			return a
+		if len(nb) > 1:
+			U = unit[nb]
+			D = U @ U.T
+			for a in range(len(nb)):
+				for b2 in range(a + 1, len(nb)):
+					if D[a, b2] > 0.7071:
+						parent[find(a)] = find(b2)
+		groups = {}
+		for a in range(len(nb)):
+			groups.setdefault(find(a), []).append(nb[a])
+		for members in groups.values():
+			acc = fn[members].sum(axis=0)
+			l = np.linalg.norm(acc)
+			nrm = acc / l if l > 1e-12 else unit[members[0]]
+			for tj in members:
+				out[corner_of[(tj, key)]] = nrm
+	table = oct_normal_table()
+	return (out @ table.T).argmax(axis=1).astype(int).tolist()
 
 
 def _stripify(tris):
@@ -959,6 +1028,7 @@ def bake_props(
 	def emit_pieces(pts, uvs, tris, tri_mat, ids, q, blob=None, piece_flags=0):
 		blob = piece_blob if blob is None else blob
 		by_mat: dict[int, list] = {}
+		corner_nrm = _corner_normal_ids(pts, tris)
 		for ti, (a, b, c) in enumerate(tris):
 			local = tri_mat[ti] if ti < len(tri_mat) else 0
 			mid = mat_byte(ids, local)
@@ -970,18 +1040,21 @@ def bake_props(
 			su = math.floor(min(u for u, _v in uvs3))
 			sv = math.floor(min(v for _u, v in uvs3))
 			verts = bytearray()
-			for i, (u, v) in zip((a, b, c), uvs3):
+			for k, (i, (u, v)) in enumerate(zip((a, b, c), uvs3)):
 				x, y, z = pts[i]
+				# GX order: position, normal (index into the engine's 256
+				# octahedral directions), texture coordinate. 11 bytes.
 				verts += struct.pack(
-					">hhhhh",
+					">hhhBhh",
 					int(max(-32767, min(32767, round(x * q)))),
 					int(max(-32767, min(32767, round(y * q)))),
 					int(max(-32767, min(32767, round(z * q)))),
+					corner_nrm[ti * 3 + k],
 					int(max(-32767, min(32767, round((u - su) * 256.0)))),
 					int(max(-32767, min(32767, round((v - sv) * 256.0)))),
 				)
 			by_mat.setdefault(mid, []).append(
-				(bytes(verts[0:10]), bytes(verts[10:20]), bytes(verts[20:30])))
+				(bytes(verts[0:11]), bytes(verts[11:22]), bytes(verts[22:33])))
 		pieces = []
 		for mid in sorted(by_mat):
 			# Triangle strips: about half the bytes of loose triangles, so
@@ -1090,6 +1163,8 @@ def bake_props(
 	from bake_worlddl import LIGHT_EXPOSURE
 	_lc = LightCache(Path(map_bsp))
 	n_sunlit = 0
+	light_blob = bytearray()
+	sun_dir = (0.0, 0.0, 1.0)
 	for model, origin, angles in props:
 		got = mesh_for(model)
 		if got is None:
@@ -1114,6 +1189,20 @@ def bake_props(
 		_lit = [sum(f[k] for f in _cube) / 6.0 + (0.25 * _sun[k] if _sun else 0.0) for k in range(3)]
 		n_sunlit += 1 if _sun else 0
 		_tex = [min(255, int(255.0 * pow(max(0.0, v) * LIGHT_EXPOSURE, 1.0 / 2.2) + 0.5)) for v in _lit]
+		# Per-face lighting for the engine's hardware lights (pack v7), in
+		# display space: a base term, the sky term along +Z and the sun
+		# term along the sun. base = the four side faces of the cube; the
+		# others are what +Z and the sun add on top of it. The underside
+		# (-Z face) is left at the base.
+		_g = lambda v: 255.0 * pow(max(0.0, v) * LIGHT_EXPOSURE, 1.0 / 2.2)
+		_side = [sum(_cube[f][k] for f in range(4)) / 4.0 for k in range(3)]
+		_avg = [sum(f[k] for f in _cube) / 6.0 for k in range(3)]
+		_b = lambda v: int(max(0, min(255, round(v))))
+		_lt_base = [_b(_g(_side[k])) for k in range(3)]
+		_lt_up = [_b(_g(_cube[4][k]) - _g(_side[k])) for k in range(3)]
+		_lt_sun = [_b(_g(_avg[k] + _sun[k]) - _g(_avg[k])) if _sun else 0 for k in range(3)]
+		light_blob += bytes(_lt_base + _lt_up + _lt_sun + [0, 0, 0])
+		sun_dir = _sdir
 		# Low byte 1 marks the colour as set (the engine's own sample otherwise).
 		inst_lit = (_tex[0] << 24) | (_tex[1] << 16) | (_tex[2] << 8) | 1
 		inst_blob += struct.pack(
@@ -1156,6 +1245,13 @@ def bake_props(
 			far_ofs, far_bytes, min(65535, far_tris), 0,
 		)
 	model_blob += b"\0" * (-len(model_blob) % 32)
+	# Pack v7: after the instances, 32 bytes with the sun direction (toward
+	# the light, 3 x s16 at 32767 = 1), then 12 bytes per instance: base RGB,
+	# sky RGB, sun RGB, 3 spare. Padded to 32.
+	inst_blob += struct.pack(">3h", *[int(round(max(-1.0, min(1.0, c)) * 32767.0)) for c in sun_dir]).ljust(32, b"\0")
+	inst_blob += bytes(light_blob)
+	inst_blob += b"\0" * (-len(inst_blob) % 32)
+	print(f"  prop lighting: {n_inst} instances, {n_sunlit} reach the sun, sun toward {tuple(round(c, 3) for c in sun_dir)}")
 	inst_ofs = 32
 	models_ofs = inst_ofs + len(inst_blob)
 	dl_base = models_ofs + len(model_blob)
