@@ -37,7 +37,9 @@ GC_PR_MAX_TRIS = 65535
 # Unique model triangles (about 20 B each in ARAM). 112000 while ARAM was
 # full; the world texture store sized to its pack (xash3d-gc#227) and the
 # shared PVS rows freed ~5 MB, so the monastery's big props get close models.
-GC_PR_MODEL_TRIS = int(os.environ.get("LC_PROP_MODEL_TRIS", "160000"))
+# 200000 (4 MB of the 16) with 5.5 MB of ARAM free after every reserve: room
+# for the props the player sees close but cannot walk up to (the chandelier).
+GC_PR_MODEL_TRIS = int(os.environ.get("LC_PROP_MODEL_TRIS", "200000"))
 GC_PR_CMD_VERTS = 1200   # vertices in one draw command (even)
 GC_PR_PIECE_BYTES = 15360  # piece body cap; header + body fit the 16 KB bounce
 
@@ -156,7 +158,7 @@ def _stripify(tris):
 
 GC_PR_PIECE_TRIS = 510  # one piece = 32 B header + verts, fits the 16 KB bounce
 GC_PR_MAX_INST = 512
-GC_PR_MAX_MODELS = 192  # engine GC_PROP_MAX_MODELS
+GC_PR_MAX_MODELS = 224  # engine GC_PROP_MAX_MODELS (192 before xash3d-gc close-models-rank)
 GC_PR_MAX_MAT = 127
 PROP_CLASSNAMES = {"prop_physics", "prop_dynamic", "prop_static"}
 # CapFaces lean stand-ins: Source NPCs / canisters have no GoldSrc LINK_ENTITY,
@@ -1176,6 +1178,8 @@ def bake_props(
 	# Memory compromises: the pack's triangle budget, and CLOSE_MAX_TRIS a
 	# model (a larger chain does not fit the engine's near cache well).
 	CLOSE_MAX_TRIS = int(os.environ.get("LC_CLOSE_MAX_TRIS", "12000"))
+	NEAR_REACH = 600.0  # units from the nearest walkable node
+	MAX_RANGE = 600.0   # a model over 2000 triangles is not drawn whole further than this
 	LOD_UNITS_PER_METRIC = 320.0 / math.tan(math.radians(75.0 / 2.0)) / 100.0
 	close_models: dict[str, tuple[SourceMesh, float]] = {}
 	nodes = []
@@ -1211,21 +1215,49 @@ def bake_props(
 				switch = lod_switch_point(vtx, 1)
 			except Exception:  # noqa: BLE001
 				continue
+			if len(full.tris) > CLOSE_MAX_TRIS and len(full.tris) >= 2 * len(mesh.tris):
+				print(f"  no close model for {model}: {len(full.tris)} tris is over the {CLOSE_MAX_TRIS} a model")
 			if len(full.tris) <= len(mesh.tris) or len(full.tris) > CLOSE_MAX_TRIS:
 				continue
 			cands.append((model, full, switch))
 		ranges = sorted(sw * LOD_UNITS_PER_METRIC for _m, _f, sw in cands if sw is not None)
 		median_range = ranges[len(ranges) // 2] if ranges else 0.0
+		# The engine's model table (GC_PR_MAX_MODELS) runs out before the
+		# triangle budget does. A prop Source gives no LODs is drawn whole in
+		# retail at any distance, so its reduced model is the only thing ever
+		# seen: those take records first, the largest gain first (the
+		# chandelier, 216 of 11074 triangles). Props with LODs follow nearest
+		# first, as before: ranking them by gain as well moved full models
+		# into the harbor and cost a window there 3 fps.
+		cands.sort(key=lambda c: (0, -len(c[1].tris) / max(1, len(model_cache[c[0]][0].tris)), c[0]) if c[2] is None
+			else (1, reach[c[0]], c[0]))
 		for model, full, switch in cands:
 			mesh, ids = model_cache[model]
 			if len(full.tris) > spare:
+				print(f"  no close model for {model}: {len(full.tris)} tris, {spare} of the budget left")
 				continue
 			# The engine takes GC_PR_MAX_MODELS records: base models first,
 			# nearest close models while records last (more is "bad layout").
 			if len(close_models) >= GC_PR_MAX_MODELS - len(used_models) - 4:
 				break
-			dist = switch * LOD_UNITS_PER_METRIC if switch is not None else median_range
+			# A prop without LODs that the player cannot walk up to (the
+			# chandelier hangs 300 units over the church floor) still fills the
+			# view from the nearest he gets: its range starts from there.
+			# Scenery he only ever sees across the map (the village on the far
+			# shore, the monastery from the beach) keeps its far model: drawn
+			# whole in every harbor frame it cost the 60 there.
+			near = reach[model] <= NEAR_REACH
+			dist = switch * LOD_UNITS_PER_METRIC if switch is not None else (reach[model] + median_range if near and reach[model] > median_range else median_range)
+			# A full model that stays on out to a long range is in most frames
+			# of its area: shipwreck_part03 (4837 triangles inside 834 units)
+			# took two harbor windows from 60 to 55 fps.
+			if dist > MAX_RANGE and len(full.tris) > 2000:
+				print(f"  no close model for {model}: {len(full.tris)} tris out to {dist:.0f} units costs the frame rate")
+				continue
 			if dist <= 0.0 or reach[model] > dist:
+				if len(full.tris) >= 2 * len(mesh.tris):
+					print(f"  no close model for {model}: {len(mesh.tris)} of {len(full.tris)} tris, range {dist:.0f} < "
+						f"{reach[model]:.0f} units from the nearest node")
 				continue  # the player never gets inside its range
 			close_models[model] = (full, dist)
 			spare -= len(full.tris)
