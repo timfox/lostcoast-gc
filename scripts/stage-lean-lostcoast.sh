@@ -243,6 +243,7 @@ echo "  + skybox $SKYNAME ($(ls "$STAGE/media"/sky_"${SKYNAME}"*.cmp | wc -l) si
 # Minimal gameinfo / liblist so FS mounts the gamedir. "game" is the title
 # the engine shows (loading panel header): the retail gameinfo.txt title2
 # ("lost coasT"), upper-cased like the retail menu logo.
+# startmap is what New Game / gc_playstart loads when gamecube.cfg has no map=.
 LCGC_GAME_TITLE="$(sed -nE 's/^[[:space:]]*title2[[:space:]]+"([^"]*)".*/\1/p' "$LCGC_CONTENT_LOSTCOAST/gameinfo.txt" 2>/dev/null | head -1 | tr '[:lower:]' '[:upper:]')"
 LCGC_GAME_TITLE="${LCGC_GAME_TITLE:-LOST COAST}"
 cat > "$STAGE/liblist.gam" <<EOF
@@ -250,12 +251,26 @@ game "$LCGC_GAME_TITLE"
 gamedir "lostcoast"
 fallback_dir "valve"
 type "single"
+startmap "${MAP}"
 EOF
 
-# Eye: pack eye0 + 1000u along yaw=150, Quake pitch +10 (look down at water).
-# Host fullgeo sweep: best corr vs retail-lostcoast-target.jpg at this aim.
-# Disc cfg token is "dumpeye" (sys_gamecube → -gcdumpeye).
-cat > "$STAGE/gamecube.cfg" <<EOF
+if [[ "${LCGC_MENU:-0}" == "1" ]]; then
+	# Retail title menu boot (LCG-7): no map= so Host opens mainui. New Game
+	# uses startmap. gcworldrender arms WorldDL after play-start. menuauto
+	# (engine) dwells on the title then presses New Game for probes.
+	cat > "$STAGE/gamecube.cfg" <<EOF
+# Retail Lost Coast title menu → New Game → ${MAP}
+startmap ${MAP}
+gcworldrender
+gcplayerinput
+menuauto
+EOF
+	echo "  + gamecube.cfg: retail menu (startmap ${MAP}, menuauto)"
+else
+	# Eye: pack eye0 + 1000u along yaw=150, Quake pitch +10 (look down at water).
+	# Host fullgeo sweep: best corr vs retail-lostcoast-target.jpg at this aim.
+	# Disc cfg token is "dumpeye" (sys_gamecube → -gcdumpeye).
+	cat > "$STAGE/gamecube.cfg" <<EOF
 # CapFaces smoke — Source→GX packs, stub GoldSrc BSP loader hook
 gccapfacessmoke
 gcworldrender
@@ -267,6 +282,7 @@ dumpeye 1655.6 2212.7 -48 8 150
 gcplayerinput
 gcplayercam
 EOF
+fi
 
 # Empty markers the engine may probe for
 mkdir -p "$STAGE/gfx" "$STAGE/sound" "$STAGE/resource"

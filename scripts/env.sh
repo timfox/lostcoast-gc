@@ -22,7 +22,9 @@ LCGC_ENGINE_3RDPARTY="${LCGC_ENGINE_3RDPARTY:-/home/tim/Desktop/lcgc-integrate/3
 # (offline: build what is there) or when someone has edited tracked files in
 # it. LCGC_ENGINE_NO_REFRESH=1 turns it off.
 if [[ -f "$LCGC_ENGINE/.lcgc-managed" && "${LCGC_ENGINE_NO_REFRESH:-0}" != "1" ]]; then
-	if git -C "$LCGC_ENGINE" fetch -q origin master 2>/dev/null; then
+	# --no-recurse-submodules: 3rdparty/MultiEmulator is a symlink; a recursive
+	# fetch refuses with "expected … not to be a symbolic link".
+	if git -C "$LCGC_ENGINE" fetch -q --no-recurse-submodules origin master 2>/dev/null; then
 		# Its third-party tree is a link to a populated copy, so git lists
 		# the submodule paths as deleted; anything else modified is real work.
 		if [[ -z "$(git -C "$LCGC_ENGINE" status --porcelain --untracked-files=no 2>/dev/null | grep -v ' 3rdparty/' || true)" ]]; then

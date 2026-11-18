@@ -14,6 +14,7 @@ usage: scripts/build-lostcoastgc.sh [options]
   --iso-only     package out/lostcoastgc.iso from existing DOL + bake
   --skip-bake    reuse cache/bake (default: bake if packs missing)
   --skip-hlsdk   reuse existing OUT/hlsdk-gamecube/lostcoast (or valve copy)
+  --menu         retail title menu boot (New Game → d2_lostcoast); not VST/smoke
   -h, --help
 EOF
 }
@@ -22,6 +23,7 @@ DOL_ONLY=0
 ISO_ONLY=0
 SKIP_BAKE=0
 SKIP_HLSDK=0
+MENU=0
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
@@ -29,6 +31,7 @@ while [[ $# -gt 0 ]]; do
 		--iso-only) ISO_ONLY=1 ;;
 		--skip-bake) SKIP_BAKE=1 ;;
 		--skip-hlsdk) SKIP_HLSDK=1 ;;
+		--menu) MENU=1; export LCGC_MENU=1 ;;
 		-h|--help) usage; exit 0 ;;
 		*) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
 	esac
@@ -165,9 +168,20 @@ rm -rf "$NEST"
 mkdir -p "$NEST"
 cp -a "$STAGE" "$NEST/lostcoast"
 
-# CapFaces smoke + retail title plaque (Lost Coast background01 in gc_menu).
-# CapFaces eye0 bake angles (HL: +pitch looks down toward waterline).
-cat > "$NEST/lostcoast/gamecube.cfg" <<'EOF'
+# Boot cfg: CapFaces smoke by default, or retail title menu with --menu / LCGC_MENU=1.
+if [[ "${LCGC_MENU:-0}" == "1" || "$MENU" -eq 1 ]]; then
+	cat > "$NEST/lostcoast/gamecube.cfg" <<'EOF'
+# Retail Lost Coast title menu → New Game → d2_lostcoast (LCG-7)
+startmap d2_lostcoast
+gcworldrender
+gcplayerinput
+menuauto
+EOF
+	echo "  + gamecube.cfg: retail menu (startmap d2_lostcoast, menuauto)"
+else
+	# CapFaces smoke + retail title plaque (Lost Coast background01 in gc_menu).
+	# CapFaces eye0 bake angles (HL: +pitch looks down toward waterline).
+	cat > "$NEST/lostcoast/gamecube.cfg" <<'EOF'
 gccapfacessmoke
 gcworldrender
 map d2_lostcoast
@@ -181,10 +195,26 @@ dumpeye 1236 2357 140 0 138
 gcplayerinput
 gcplayercam
 EOF
-# Optional still-eye override: LCGC_DUMP_EYE="x y z [pitch] [yaw]"
-if [[ -n "${LCGC_DUMP_EYE:-}" ]]; then
-	sed -i "s/^dumpeye .*/dumpeye ${LCGC_DUMP_EYE}/" "$NEST/lostcoast/gamecube.cfg"
-	echo "  + gamecube.cfg: dumpeye ${LCGC_DUMP_EYE}"
+	# Optional still-eye override: LCGC_DUMP_EYE="x y z [pitch] [yaw]"
+	if [[ -n "${LCGC_DUMP_EYE:-}" ]]; then
+		sed -i "s/^dumpeye .*/dumpeye ${LCGC_DUMP_EYE}/" "$NEST/lostcoast/gamecube.cfg"
+		echo "  + gamecube.cfg: dumpeye ${LCGC_DUMP_EYE}"
+	fi
+	# LCGC_VST=1: video-stress-test disc — ride the retail ptrack_vst flythrough
+	# (whole-map coverage for render parity). Pair with a private LCGC_ISO and
+	# XASH3D_GC_ISO_CACHE so the still-eye disc is left alone (scripts/probe-vst.sh).
+	if [[ "${LCGC_VST:-0}" == "1" ]]; then
+		sed -i 's/^#gcvst$/gcvst/' "$NEST/lostcoast/gamecube.cfg"
+		# Prefer the on-rails ride; leave dumpeye commented so GetArgv does not
+		# bake a still-eye path when gcvst wins later.
+		sed -i 's/^dumpeye /#dumpeye /' "$NEST/lostcoast/gamecube.cfg"
+		echo "  + gamecube.cfg: gcvst (stress flythrough)"
+		# LCGC_PROFILE=1: host stage profiler (-gcprofile) for frame-time work.
+		if [[ "${LCGC_PROFILE:-0}" == "1" ]]; then
+			echo "profile" >> "$NEST/lostcoast/gamecube.cfg"
+			echo "  + gamecube.cfg: profile"
+		fi
+	fi
 fi
 # LCGC_EXTRA_CFG="word ..." appends lines to the boot file, e.g.
 # lcscenetest (read by lostcoast_npcs.cpp) to start the fisherman's intro
@@ -202,20 +232,9 @@ if [[ -n "${LCGC_TAS:-}" && -f "${LCGC_TAS}" ]]; then
 	echo "tas $(basename "${LCGC_TAS%.tas}")" >> "$NEST/lostcoast/gamecube.cfg"
 	echo "  + gamecube.cfg: tas $(basename "${LCGC_TAS%.tas}")"
 fi
-# LCGC_VST=1: video-stress-test disc — ride the retail ptrack_vst flythrough
-# (whole-map coverage for render parity). Pair with a private LCGC_ISO and
-# XASH3D_GC_ISO_CACHE so the still-eye disc is left alone (scripts/probe-vst.sh).
-if [[ "${LCGC_VST:-0}" == "1" ]]; then
-	sed -i 's/^#gcvst$/gcvst/' "$NEST/lostcoast/gamecube.cfg"
-	# Prefer the on-rails ride; leave dumpeye commented so GetArgv does not
-	# bake a still-eye path when gcvst wins later.
-	sed -i 's/^dumpeye /#dumpeye /' "$NEST/lostcoast/gamecube.cfg"
-	echo "  + gamecube.cfg: gcvst (stress flythrough)"
-	# LCGC_PROFILE=1: host stage profiler (-gcprofile) for frame-time work.
-	if [[ "${LCGC_PROFILE:-0}" == "1" ]]; then
-		echo "profile" >> "$NEST/lostcoast/gamecube.cfg"
-		echo "  + gamecube.cfg: profile"
-	fi
+# Ensure nest liblist carries startmap for menu New Game.
+if [[ -f "$NEST/lostcoast/liblist.gam" ]] && ! grep -q '^startmap' "$NEST/lostcoast/liblist.gam"; then
+	echo 'startmap "d2_lostcoast"' >> "$NEST/lostcoast/liblist.gam"
 fi
 # HL1 357: viewmodel.pk3 fails DVD fopen on Flipper (only extras.pk3 mounts).
 # Disc builder also swaps nest extras for valve extras — patch every extras we
@@ -303,6 +322,8 @@ python3 "$LCGC_ENGINE/scripts/build-gamecube-disc.py" \
 	--output "$LCGC_ISO"
 
 # Verify single-session ISO kept host-prebaked packs (disc builder preserves them).
+export LCGC_MENU="${LCGC_MENU:-0}"
+export MENU
 python3 - <<'PY'
 from pathlib import Path
 import os
@@ -310,10 +331,12 @@ import subprocess
 import tempfile
 
 iso = Path(os.environ["LCGC_ISO"])
+menu = os.environ.get("LCGC_MENU", "0") == "1" or os.environ.get("MENU", "0") == "1"
 vtd = Path(tempfile.mkdtemp(prefix="lcgc-iso-verify-"))
 try:
     checks = {
         "lostcoast/gamecube.cfg": 20,
+        "lostcoast/liblist.gam": 20,
         "lostcoast/media/cf_d2_lostcoast.gcp": 40_000,
         "lostcoast/media/wt_d2_lostcoast.gct": 100_000,
         "lostcoast/media/vis_d2_lostcoast.gcv": 10_000,
@@ -339,8 +362,25 @@ try:
             raise SystemExit(f"ISO pack too small: /xash3d/{rel} ({sz} < {min_sz})")
     cfg = (vtd / "gamecube.cfg").read_text()
     print(cfg)
-    if "gccapfacessmoke" not in cfg:
-        raise SystemExit("gamecube.cfg missing gccapfacessmoke")
+    lib = (vtd / "liblist.gam").read_text()
+    if "startmap" not in lib or "d2_lostcoast" not in lib:
+        raise SystemExit("liblist.gam missing startmap d2_lostcoast")
+    cfg_lines = [ln.strip() for ln in cfg.splitlines() if ln.strip() and not ln.strip().startswith("#")]
+    if menu:
+        # "map d2_lostcoast" must not appear as a token line; startmap contains "map ".
+        if any(ln == "map d2_lostcoast" or ln.startswith("map d2_lostcoast ") for ln in cfg_lines):
+            raise SystemExit("menu ISO gamecube.cfg still has smoke/VST map boot")
+        if any(tok in cfg for tok in ("gccapfacessmoke", "gcvst")):
+            raise SystemExit("menu ISO gamecube.cfg still has smoke/VST map boot")
+        if "startmap d2_lostcoast" not in cfg:
+            raise SystemExit("menu ISO gamecube.cfg missing startmap d2_lostcoast")
+        if "menuauto" not in cfg:
+            raise SystemExit("menu ISO gamecube.cfg missing menuauto")
+        if "gcworldrender" not in cfg:
+            raise SystemExit("menu ISO gamecube.cfg missing gcworldrender")
+    else:
+        if "gccapfacessmoke" not in cfg:
+            raise SystemExit("gamecube.cfg missing gccapfacessmoke")
     if (vtd / "cf_d2_lostcoast.gcp").read_bytes()[:4] != b"GCcf":
         raise SystemExit("bad CapFaces magic")
     if (vtd / "wt_d2_lostcoast.gct").read_bytes()[:4] != b"GCWT":
