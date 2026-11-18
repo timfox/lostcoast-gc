@@ -8,6 +8,17 @@ LCGC_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export LCGC_ROOT
 
 export LCGC_ENGINE="${LCGC_ENGINE:-$LCGC_ROOT/engine}"
+# A build against an engine checkout that is far behind master gives today's
+# bake to an old renderer (the default `engine` link sat 486 commits behind
+# for days). Say so; fetch nothing, change nothing.
+if [[ -d "$LCGC_ENGINE/.git" || -f "$LCGC_ENGINE/.git" ]]; then
+	_lcgc_behind="$(git -C "$LCGC_ENGINE" rev-list --count HEAD..origin/master 2>/dev/null || echo 0)"
+	if [[ "${_lcgc_behind:-0}" -gt 20 ]]; then
+		echo "WARNING: engine checkout $LCGC_ENGINE is ${_lcgc_behind} commits behind origin/master" >&2
+		echo "         ($(git -C "$LCGC_ENGINE" log -1 --format='%h %cd' --date=short 2>/dev/null)). Set LCGC_ENGINE to a current checkout." >&2
+	fi
+	unset _lcgc_behind
+fi
 if [[ ! -d "$LCGC_ENGINE/scripts" ]]; then
 	echo "error: engine symlink missing or incomplete: $LCGC_ENGINE" >&2
 	echo "  run scripts/link-deps.sh" >&2

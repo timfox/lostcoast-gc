@@ -108,6 +108,13 @@ if (( ! ISO_ONLY )); then
 	echo "DOL → $LCGC_DOL (gamedir=lostcoast verified)"
 fi
 
+# The DOL step leaves the shell in the engine checkout. Staging and packaging
+# must run from here: packaged from the engine directory the disc comes out
+# 1.6 MB larger and the characters' textures load as garbage (577 "dims out
+# of range" errors, then the game stops logging), while --iso-only, which
+# never changed directory, made a good disc from the same files.
+cd "$LCGC_ROOT"
+
 if (( DOL_ONLY )); then
 	exit 0
 fi
