@@ -139,7 +139,14 @@ def bake_scene(img: SceneImage, vcd: str, actor: str, scripts: dict, waves: set[
 				elif e.type == "moveto":
 					lines.append(f"moveto {e.start:.2f} {e.end:.2f} {e.param1} {e.distance:g} {e.param2 or 'Walk'}")
 				elif e.type == "gesture" and e.param1:
-					lines.append(f"gesture {e.start:.2f} {e.end:.2f} {e.param1}")
+					# Timing tags: where the scene puts each of the sequence's own
+					# marks (apex, accent, loop, end). Pairs of playback fraction
+					# and sequence fraction; the cycle runs straight between them
+					# (CChoreoEvent::GetOriginalPercentageFromPlaybackPercentage).
+					play = dict(e.abs_tags[0]) if len(e.abs_tags) > 1 else {}
+					pairs = sorted((play[n], o) for n, o in (e.abs_tags[1] if len(e.abs_tags) > 1 else []) if n in play)[:4]
+					tags = "".join(f" {p:.3f} {o:.3f}" for p, o in pairs)
+					lines.append(f"gesture {e.start:.2f} {e.end:.2f} {e.param1}{tags}")
 				elif e.type == "sequence" and e.param1:
 					lines.append(f"sequence {e.start:.2f} {e.end:.2f} {e.param1}")
 				elif e.type == "firetrigger":

@@ -65,6 +65,11 @@ if [[ "${LCGC_STUDIO_NPCS:-1}" == "1" ]]; then
 		--hl2 "$LCGC_CONTENT_HL2" \
 		--map "$LCGC_CONTENT_LOSTCOAST/maps/${MAP}.bsp" \
 		--out "$BAKE/studio"
+	# The gestures those scenes play, one rotation track each (r_gx_gesture.c)
+	python3 "$LCGC_ROOT/tools/bake_lostcoast_gestures.py" \
+		--lostcoast "$LCGC_CONTENT_LOSTCOAST" \
+		--hl2 "$LCGC_CONTENT_HL2" \
+		--out "$BAKE/studio"
 else
 	rm -rf "$BAKE/studio"
 fi
