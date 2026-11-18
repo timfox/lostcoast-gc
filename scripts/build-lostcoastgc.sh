@@ -365,8 +365,12 @@ try:
     lib = (vtd / "liblist.gam").read_text()
     if "startmap" not in lib or "d2_lostcoast" not in lib:
         raise SystemExit("liblist.gam missing startmap d2_lostcoast")
+    cfg_lines = [ln.strip() for ln in cfg.splitlines() if ln.strip() and not ln.strip().startswith("#")]
     if menu:
-        if "map d2_lostcoast" in cfg or "gccapfacessmoke" in cfg or "gcvst" in cfg:
+        # "map d2_lostcoast" must not appear as a token line; startmap contains "map ".
+        if any(ln == "map d2_lostcoast" or ln.startswith("map d2_lostcoast ") for ln in cfg_lines):
+            raise SystemExit("menu ISO gamecube.cfg still has smoke/VST map boot")
+        if any(tok in cfg for tok in ("gccapfacessmoke", "gcvst")):
             raise SystemExit("menu ISO gamecube.cfg still has smoke/VST map boot")
         if "startmap d2_lostcoast" not in cfg:
             raise SystemExit("menu ISO gamecube.cfg missing startmap d2_lostcoast")

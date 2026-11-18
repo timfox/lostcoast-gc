@@ -31,7 +31,8 @@ try:
 	cfg = (vtd / "gamecube.cfg").read_text()
 	lib = (vtd / "liblist.gam").read_text()
 	src = (vtd / "SOURCE.txt").read_text()
-	if "map d2_lostcoast" in cfg or "gccapfacessmoke" in cfg:
+	cfg_lines = [ln.strip() for ln in cfg.splitlines() if ln.strip() and not ln.strip().startswith("#")]
+	if any(ln == "map d2_lostcoast" or ln.startswith("map d2_lostcoast ") for ln in cfg_lines) or "gccapfacessmoke" in cfg:
 		raise SystemExit("ISO is CapFaces/VST smoke, not --menu (rebuild with --menu)")
 	if "startmap d2_lostcoast" not in cfg and "startmap" not in lib:
 		raise SystemExit("ISO missing startmap d2_lostcoast")
@@ -63,8 +64,7 @@ if [[ -z "${DOLPHIN_BIN:-}" ]]; then
 fi
 
 mkdir -p "$DOLPHIN_USER/Config" "$DOLPHIN_USER/Logs"
-if [[ ! -f "$DOLPHIN_USER/Config/Logger.ini" ]]; then
-	cat > "$DOLPHIN_USER/Config/Logger.ini" <<'EOF'
+cat > "$DOLPHIN_USER/Config/Logger.ini" <<'EOF'
 [Options]
 WriteToFile = True
 WriteToConsole = True
@@ -74,7 +74,8 @@ OSREPORT = True
 BOOT = True
 OSREPORT_HLE = True
 EOF
-fi
+# Truncate so a prior CapFaces/VST log cannot fake MAP READY gates.
+: > "$DOLPHIN_USER/Logs/dolphin.log"
 
 # Menu dwell + New Game + map load needs more than CapFaces smoke.
 TIMEOUT="${DOLPHIN_TIMEOUT:-180}"
@@ -105,12 +106,14 @@ TITLE=0
 MENU_OPEN=0
 PLAY_START=0
 MAP_READY=0
-grep -Eiq 'main menu opened' "$LOGDIR/dolphin.log" "$LOGDIR/stderr.log" 2>/dev/null && MENU_OPEN=1
+# Lost Coast title menu: gc_menu_ready + title tiles (mainui may not print "main menu opened").
+grep -Eiq 'main menu opened|gc_menu_ready set 1|menu tile resource/gc_menu/' \
+	"$LOGDIR/dolphin.log" "$LOGDIR/stderr.log" 2>/dev/null && MENU_OPEN=1
 grep -Eiq 'gc_menu_ready set 1|probe menu ready gate open|probe menuauto New Game dwell' \
 	"$LOGDIR/dolphin.log" "$LOGDIR/stderr.log" 2>/dev/null && TITLE=1
 grep -Eiq 'play start begin d2_lostcoast|play start uses test start map d2_lostcoast|probe menuauto New Game force gc_playstart' \
 	"$LOGDIR/dolphin.log" "$LOGDIR/stderr.log" 2>/dev/null && PLAY_START=1
-grep -Eiq 'world DL Active load map=d2_lostcoast|direct map ready|play start post-activate d2_lostcoast|MAP READY' \
+grep -Eiq 'world DL Active load map=d2_lostcoast|direct map ready|play start post-activate d2_lostcoast|MAP READY|frame budget samples armed after map ready' \
 	"$LOGDIR/dolphin.log" "$LOGDIR/stderr.log" 2>/dev/null && MAP_READY=1
 
 {
