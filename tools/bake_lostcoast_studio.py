@@ -505,6 +505,16 @@ def lod_geometry(mdl, vvd, vtx, lod, bones):
 	eyes = eye_materials(mdl)
 	if eyes and not any(t[0] in eyes for t in tris):
 		tris = tris + [t for t in load_mesh(mdl, vvd, vtx, 0)[0] if t[0] in eyes]
+	# The same LODs drop the teeth and the inside of the mouth. He opens his
+	# mouth to speak now, so they come back from the coarsest LOD that still
+	# has them (LOD 2: 242 + 77 triangles).
+	mouth = {i for i, n in enumerate(_texture_names(mdl)) if n.lower() in ("teeth", "mouth")}
+	if mouth and not any(t[0] in mouth for t in tris):
+		for finer in range(lod - 1, -1, -1):
+			extra = [t for t in load_mesh(mdl, vvd, vtx, finer)[0] if t[0] in mouth]
+			if extra:
+				tris = tris + extra
+				break
 	ids = sorted({v for t in tris for v in t[1:]})
 	vmap = {v: i for i, v in enumerate(ids)}
 	pos, nrm, uv, vb = [], [], [], []
@@ -518,7 +528,7 @@ def lod_geometry(mdl, vvd, vtx, lod, bones):
 		uv.append(t)
 		vb.append(bi)
 	ltris = [(m, vmap[a], vmap[b2], vmap[c]) for m, a, b2, c in tris]
-	return ltris, pos, nrm, uv, vb, used
+	return ltris, pos, nrm, uv, vb, used, ids
 
 
 MAX_BATCH_VERTS = 256   # 8-bit vertex indices, one array window per batch
@@ -597,11 +607,101 @@ def placement_light(cube, sun):
 	return faces, tuple(top), _fit_curve(lam), _fit_curve(half)
 
 
-def write_actor(name, mdl, vvd, vtx, bones, mat_flags, out_path: Path, placements, extras=()):
+def write_face(face, out_path: Path, order, ids, vb, bones, pf: int) -> None:
+	"""Mouth shapes for lip sync: <name>.gcf beside the actor mesh.
+
+	face = (Flexes, phoneme table). Every (flex descriptor, ramp) the phonemes
+	reach becomes one shape: the offsets it gives the actor's vertices, in
+	each vertex's bone space and in the position array's own fixed point.
+	A phoneme is one weight per shape. The engine blends the weights of the
+	phoneme being spoken and the next, and adds the shapes to the position
+	array (r_gx_face.c).
+
+	  0   "GCFA", u16 version (1), u16 nshape
+	  8   u16 nslot, u16 nphon, u8 shift, 3 x 0
+	  16  u32 slots_ofs, u32 dir_ofs, u32 phon_ofs, u32 size
+	  slots: nslot x u16: index into LOD 0's position array
+	  dir:   nshape x 8: u32 ofs, u16 count, u16 0
+	  entries: count x 6: u16 slot table index, s8 dx, dy, dz (position
+	         units >> shift), u8 0
+	  phon:  nphon x (u16 code, nshape x u8 weight * 32), padded to even
+	"""
+	fx, phon = face
+	# shapes: (descriptor that weighs it, ramp) -> {vvd id: [dx, dy, dz]} in model space
+	shapes: dict[tuple, dict[int, list[float]]] = {}
+	for fd, t, pair, va in fx.flexes:
+		for vid, speed, side, d in va:
+			# ComputeFlexedVertex: (w1 * (1 - side) + side * w2) * speed, w2 the pair's weight
+			parts = [(fd, (1.0 - side) * speed), (pair, side * speed)] if pair else [(fd, speed)]
+			for desc, k in parts:
+				if k <= 0.0:
+					continue
+				o = shapes.setdefault((desc, t), {}).setdefault(vid, [0.0, 0.0, 0.0])
+				for a in range(3):
+					o[a] += d[a] * k
+	weights = {code: fx.weights(vals) for code, (_n, vals) in phon.items()}
+	keys = [k for k in shapes if any(fx.ramp(k[1], w[k[0]]) > 0.004 for w in weights.values())]
+	peak = {k: max(fx.ramp(k[1], w[k[0]]) for w in weights.values()) for k in keys}
+	slots_of: dict[int, list[int]] = {}
+	local_of = {vid: i for i, vid in enumerate(ids)}
+	for si, v in enumerate(order):
+		slots_of.setdefault(v, []).append(si)
+	scale = float(1 << pf)
+	raw = []  # per shape: [(slot, (dx, dy, dz) in position units)]
+	biggest = 0.0
+	for k in keys:
+		ent = []
+		for vid, d in shapes[k].items():
+			li = local_of.get(vid)
+			if li is None or li not in slots_of:
+				continue
+			if math.sqrt(sum(c * c for c in d)) * peak[k] < 0.03:
+				continue  # under a 30th of a unit at this shape's strongest phoneme
+			bd = ss.mat34_rotate(bones[vb[li]].pose_to_bone, d)
+			fixed = tuple(c * scale for c in bd)
+			biggest = max(biggest, max(abs(c) for c in fixed))
+			for si in slots_of[li]:
+				ent.append((si, fixed))
+		raw.append(ent)
+	keep = [i for i, e in enumerate(raw) if e]
+	keys = [keys[i] for i in keep]
+	raw = [raw[i] for i in keep]
+	if not keys or len(keys) > 255:
+		print(f"  face: no usable shapes ({len(keys)})")
+		return
+	shift = 0
+	while biggest / (1 << shift) > 127.0:
+		shift += 1
+	slot_list = sorted({si for e in raw for si, _d in e})
+	slot_ix = {si: i for i, si in enumerate(slot_list)}
+	slots_ofs = 32
+	dir_ofs = slots_ofs + len(slot_list) * 2
+	body_ofs = dir_ofs + len(keys) * 8
+	body = bytearray()
+	dirb = bytearray()
+	for e in raw:
+		dirb += struct.pack(">IHH", body_ofs + len(body), len(e), 0)
+		for si, d in sorted(e):
+			body += struct.pack(">H3bB", slot_ix[si], *(max(-127, min(127, int(round(c / (1 << shift))))) for c in d), 0)
+	phon_ofs = body_ofs + len(body)
+	ph = bytearray()
+	for code in sorted(weights):
+		ph += struct.pack(">H", code)
+		ph += bytes(max(0, min(255, int(round(fx.ramp(k[1], weights[code][k[0]]) * 32.0)))) for k in keys)
+		if len(ph) & 1:
+			ph += b"\0"
+	size = phon_ofs + len(ph)
+	hdr = struct.pack(">4sHHHHB3xIIII", b"GCFA", 1, len(keys), len(slot_list), len(weights), shift, slots_ofs, dir_ofs, phon_ofs, size)
+	out_path.write_bytes(hdr + b"".join(struct.pack(">H", si) for si in slot_list) + bytes(dirb) + bytes(body) + bytes(ph))
+	print(f"  {out_path.name}: {len(keys)} shapes, {len(slot_list)} vertex slots, {sum(len(e) for e in raw)} offsets, "
+		f"{len(weights)} phonemes, shift {shift}, {size} bytes")
+
+
+def write_actor(name, mdl, vvd, vtx, bones, mat_flags, out_path: Path, placements, extras=(), face=None):
 	sw = vtx_switch_points(vtx)
 	lods = []
 	for li, lod in enumerate(ACTOR_LODS[name]):
-		tris, pos, nrm, uv, vb, used = lod_geometry(mdl, vvd, vtx, lod, bones)
+		tris, pos, nrm, uv, vb, used, ids = lod_geometry(mdl, vvd, vtx, lod, bones)
 		for etris, epos, enrm, euv, evb in extras:
 			base = len(pos)
 			tris = tris + [(m, a + base, b + base, c + base) for m, a, b, c in etris]
@@ -609,7 +709,7 @@ def write_actor(name, mdl, vvd, vtx, bones, mat_flags, out_path: Path, placement
 		# Source picks LOD i once the metric passes LOD i's switch point; the
 		# near LOD stands in for every finer one.
 		switch = 0.0 if li == 0 else max(0.0, sw[used] if used < len(sw) else 0.0)
-		lods.append((switch, tris, pos, nrm, uv, vb, used))
+		lods.append((switch, tris, pos, nrm, uv, vb, used, ids))
 
 	buf = bytearray(64)
 
@@ -618,7 +718,7 @@ def write_actor(name, mdl, vvd, vtx, bones, mat_flags, out_path: Path, placement
 
 	lod_ofs = []
 	stats = []
-	for switch, tris, pos, nrm, uv, vb, used in lods:
+	for switch, tris, pos, nrm, uv, vb, used, ids in lods:
 		pad32()
 		lh = len(buf)
 		lod_ofs.append(lh)
@@ -652,6 +752,8 @@ def write_actor(name, mdl, vvd, vtx, bones, mat_flags, out_path: Path, placement
 		pos_ofs = len(buf)
 		for v in order:
 			buf += struct.pack(">3h", *(max(-32767, min(32767, int(round(c * (1 << pf))))) for c in pos[v]))
+		if face is not None and lh == lod_ofs[0]:
+			write_face(face, out_path.with_suffix(".gcf"), order, ids, vb, bones, pf)
 		pad32()
 		nrm_ofs = len(buf)
 		for v in order:
@@ -927,7 +1029,7 @@ def convert(vpks, name: str, lod: int, tex_max: int, out_dir: Path, flip: bool, 
 		names = {b.name.lower(): i for i, b in enumerate(bones)}
 		bmap = [names.get(b.name.lower(), -1) for b in esrc.bones]
 		if emdl and evvd and evtx and bmap and bmap[0] >= 0:
-			etris, epos, enrm, euv, evb, _ = lod_geometry(emdl, evvd, evtx, 0, esrc.bones)
+			etris, epos, enrm, euv, evb, _, _ids = lod_geometry(emdl, evvd, evtx, 0, esrc.bones)
 			# its skin becomes one more material column of the skin table
 			numtex, texidx = struct.unpack_from("<ii", emdl, 204)
 			ncd_e, cdidx_e = struct.unpack_from("<ii", emdl, 212)
@@ -962,8 +1064,16 @@ def convert(vpks, name: str, lod: int, tex_max: int, out_dir: Path, flip: bool, 
 				f |= BATCH_ADDITIVE
 			mat_flags[m] = f
 		out_dir.joinpath("models", "lc").mkdir(parents=True, exist_ok=True)
+		face = None
+		if struct.unpack_from("<i", mdl, 260)[0] > 0:
+			# the model has face shapes: lip sync from the game's phoneme table
+			import source_flex
+
+			ptxt = read_first(vpks, "expressions/phonemes.txt")
+			if ptxt:
+				face = (source_flex.Flexes(mdl, vvd), source_flex.phoneme_table(ptxt.decode("latin-1")))
 		write_actor(name, mdl, vvd, vtx, bones, mat_flags,
-			out_dir / "models" / "lc" / f"{name}.gca", placements or [], extras)
+			out_dir / "models" / "lc" / f"{name}.gca", placements or [], extras, face)
 		# Flipper draws the mesh from the .gca; the MDL keeps the skeleton,
 		# sequences, bounds and skins.
 		tris = []

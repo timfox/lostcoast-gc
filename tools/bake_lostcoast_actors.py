@@ -72,6 +72,25 @@ def sound_volume(kv: dict) -> float:
 		return 1.0
 
 
+def lip_chunk(wav: bytes, source: bytes) -> bytes:
+	"""Carry the source wave's phoneme timings (Faceposer's VDAT chunk) into
+	the baked wave as a "GCLP" chunk ahead of the samples, where the engine's
+	voice stream finds it in the sector it reads first: u16 count, then
+	count x (u16 phoneme code, u16 start ms, u16 end ms), big-endian."""
+	from source_flex import wave_phonemes
+
+	ev = wave_phonemes(source)
+	if not ev:
+		return wav
+	body = struct.pack(">H", len(ev)) + b"".join(
+		struct.pack(">HHH", code & 0xFFFF, min(65535, int(round(s * 1000))), min(65535, int(round(e * 1000)))) for code, s, e in ev)
+	if len(body) & 1:
+		body += b"\0"
+	i = wav.index(b"data", 12)
+	out = wav[:i] + b"GCLP" + struct.pack("<I", len(body)) + body + wav[i:]
+	return out[:4] + struct.pack("<I", len(out) - 8) + out[8:]
+
+
 def resample_wave(data: bytes, rate: int) -> bytes:
 	"""Any PCM wave -> mono 16-bit at rate (polyphase low-pass resample)."""
 	from math import gcd
@@ -264,7 +283,7 @@ def main() -> int:
 			continue
 		dst = out / "sound" / w
 		dst.parent.mkdir(parents=True, exist_ok=True)
-		pcm = resample_wave(raw, VOICE_RATE)
+		pcm = lip_chunk(resample_wave(raw, VOICE_RATE), raw)
 		dst.write_bytes(pcm)
 		total += len(pcm)
 	print(f"  voice: {len(waves)} waves, {total // 1024} KB at {VOICE_RATE} Hz")

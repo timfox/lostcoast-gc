@@ -15,17 +15,19 @@ that onto the bone's current local rotation (r_gx_gesture.c), which is exact
 for the delta layers and exact for the absolute layers wherever the base is
 that idle pose.
 
-Not carried: bone translation (the postures move the pelvis by up to 3
-units) and the attachment helper bones.
+Bones a gesture also moves (the hat lifting off the head, the pelvis in a
+posture shift) carry the translation it adds, base to result, in the
+parent's space. Not carried: the attachment helper bones.
 
 Output scripts/lc/<name>.gst, big-endian:
-  0   "GCGS", u16 version (1), u16 ngest
+  0   "GCGS", u16 version (2), u16 ngest
   8   u16 nbones, u16 0, u32 names_ofs, u32 dir_ofs, pad to 32
   names: nbones x char[32]
-  dir:   ngest x 48: char name[28], u16 nframes, u8 nrot, u8 0, f32 seconds,
-         u32 bones_ofs, u32 frames_ofs, u32 0
-  bones: nrot x u8 (index into names)
-  frames: nframes x nrot x 3 x s16 (quat x, y, z * 32767, w >= 0)
+  dir:   ngest x 48: char name[28], u16 nframes, u8 nrot, u8 npos,
+         f32 seconds, u32 bones_ofs, u32 frames_ofs, u32 0
+  bones: nrot x u8, then npos x u8 (indices into names)
+  frames: nframes x ( nrot x 3 x s16 (quat x, y, z * 32767, w >= 0),
+          npos x 3 x s16 (translation * 256) )
 """
 from __future__ import annotations
 
@@ -43,6 +45,8 @@ from vpk import open_vpk_roots, read_first  # noqa: E402
 D = "models/lostcoast/fisherman/"
 HZ = 10.0
 MIN_DEG = 1.0
+MIN_MOVE = 0.1   # units: bones that move less carry rotation only
+MAX_POS = 8
 SKIP_BONES = ("anim_attachment", "valvebiped.forward")
 vpks = None
 
@@ -180,9 +184,11 @@ def bake(out: Path, names_wanted: list[str]) -> None:
 		dur = (a.numframes - 1) / a.fps
 		nf = max(2, int(round(dur * HZ)) + 1)
 		frames = []
+		moves = []
 		for f in range(nf):
-			_pos, q = compose(m, g, bp, bq, f / (nf - 1) * 0.9999)
+			pos, q = compose(m, g, bp, bq, f / (nf - 1) * 0.9999)
 			frames.append([ss.quat_mul(qconj(bq[b]), q[b]) for b in range(m.nb)])
+			moves.append([tuple(pos[b][i] - bp[b][i] for i in range(3)) for b in range(m.nb)])
 		keep = []
 		for b in range(m.nb):
 			if any(s in bnames[b].lower() for s in SKIP_BONES):
@@ -193,10 +199,13 @@ def bake(out: Path, names_wanted: list[str]) -> None:
 		if not keep or len(keep) > 255:
 			print(f"  gesture {g}: nothing to keep, skipped")
 			continue
-		for b in keep:
+		far = {b: max(math.sqrt(sum(c * c for c in mv[b])) for mv in moves) for b in range(m.nb)
+			if not any(s in bnames[b].lower() for s in SKIP_BONES)}
+		pkeep = sorted((b for b in far if far[b] >= MIN_MOVE), key=lambda b: -far[b])[:MAX_POS]
+		for b in keep + pkeep:
 			if b not in used:
 				used.append(b)
-		gest.append((g, dur, keep, frames))
+		gest.append((g, dur, keep, frames, pkeep, moves, far))
 	# Look-at pose parameters (head_yaw, head_pitch, spine_yaw, body_yaw): each
 	# is a three-way blend sequence of delta poses at the parameter's low end,
 	# middle and high end. Kept as three-frame tracks "look_<pose>" whose
@@ -227,7 +236,7 @@ def bake(out: Path, names_wanted: list[str]) -> None:
 		for b in keep:
 			if b not in used:
 				used.append(b)
-		gest.append(("look_" + pose, 0.0, keep, frames))
+		gest.append(("look_" + pose, 0.0, keep, frames, [], [], {}))
 	if len(used) > 255:
 		raise SystemExit("too many gesture bones")
 	names_ofs = 32
@@ -235,21 +244,24 @@ def bake(out: Path, names_wanted: list[str]) -> None:
 	body = bytearray()
 	body_ofs = dir_ofs + len(gest) * 48
 	dirb = bytearray()
-	for g, dur, keep, frames in gest:
+	for g, dur, keep, frames, pkeep, moves, far in gest:
 		bones_ofs = body_ofs + len(body)
-		body += bytes(used.index(b) for b in keep)
+		body += bytes(used.index(b) for b in keep) + bytes(used.index(b) for b in pkeep)
 		if len(body) & 1:
 			body += b"\0"
 		frames_ofs = body_ofs + len(body)
-		for fr in frames:
+		for fi, fr in enumerate(frames):
 			for b in keep:
 				x, y, z, w = fr[b]
 				if w < 0:
 					x, y, z = -x, -y, -z
 				body += struct.pack(">3h", *(max(-32767, min(32767, int(round(c * 32767)))) for c in (x, y, z)))
-		dirb += struct.pack(">28sHBBfIII", g.lower().encode()[:27], len(frames), len(keep), 0, dur, bones_ofs, frames_ofs, 0)
-		print(f"  gesture {g}: {dur:.1f} s, {len(frames)} frames, {len(keep)} bones")
-	hdr = struct.pack(">4sHHHHII", b"GCGS", 1, len(gest), len(used), 0, names_ofs, dir_ofs).ljust(32, b"\0")
+			for b in pkeep:
+				body += struct.pack(">3h", *(max(-32767, min(32767, int(round(c * 256.0)))) for c in moves[fi][b]))
+		dirb += struct.pack(">28sHBBfIII", g.lower().encode()[:27], len(frames), len(keep), len(pkeep), dur, bones_ofs, frames_ofs, 0)
+		print(f"  gesture {g}: {dur:.1f} s, {len(frames)} frames, {len(keep)} bones turn, {len(pkeep)} move"
+			+ (" (" + ", ".join(f"{bnames[b].split('.')[-1].replace('Bip01_', '')} {far[b]:.1f}" for b in pkeep[:4]) + ")" if pkeep else ""))
+	hdr = struct.pack(">4sHHHHII", b"GCGS", 2, len(gest), len(used), 0, names_ofs, dir_ofs).ljust(32, b"\0")
 	names = b"".join(bnames[b].encode()[:31].ljust(32, b"\0") for b in used)
 	out.parent.mkdir(parents=True, exist_ok=True)
 	out.write_bytes(hdr + names + bytes(dirb) + bytes(body))

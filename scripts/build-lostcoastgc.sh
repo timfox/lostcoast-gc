@@ -273,6 +273,9 @@ if [[ -d "$LCGC_CACHE/bake/studio/models/lc" ]]; then
 	# Flipper-skinned characters: display lists + lighting (r_gx_actor.c).
 	rm -f "$NEST/lostcoast/gc_studio/"*.gca
 	cp -f "$LCGC_CACHE/bake/studio/models/lc/"*.gca "$NEST/lostcoast/gc_studio/" 2>/dev/null || true
+	# Face shapes for lip sync (r_gx_face.c), beside the actor mesh.
+	rm -f "$NEST/lostcoast/gc_studio/"*.gcf
+	cp -f "$LCGC_CACHE/bake/studio/models/lc/"*.gcf "$NEST/lostcoast/gc_studio/" 2>/dev/null || true
 	# What the characters do (bake_lostcoast_actors.py): scene scripts, the
 	# AI node graph and their voice lines.
 	for d in scripts sound; do
