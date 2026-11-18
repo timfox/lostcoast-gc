@@ -34,7 +34,10 @@ GC_PR_MAGIC = b"GCpr"
 GC_PR_UV8 = os.environ.get("LC_PROP_UV8", "1") != "0"
 GC_PR_VERSION = 8 if GC_PR_UV8 else 7
 GC_PR_MAX_TRIS = 65535
-GC_PR_MODEL_TRIS = 112000  # unique model triangles (about 23 B each in ARAM; 2.6 MB of the 16)
+# Unique model triangles (about 20 B each in ARAM). 112000 while ARAM was
+# full; the world texture store sized to its pack (xash3d-gc#227) and the
+# shared PVS rows freed ~5 MB, so the monastery's big props get close models.
+GC_PR_MODEL_TRIS = int(os.environ.get("LC_PROP_MODEL_TRIS", "160000"))
 GC_PR_CMD_VERTS = 1200   # vertices in one draw command (even)
 GC_PR_PIECE_BYTES = 15360  # piece body cap; header + body fit the 16 KB bounce
 
@@ -1163,7 +1166,7 @@ def bake_props(
 	# where the player can walk), nearest first, while the budget lasts.
 	# Memory compromises: the pack's triangle budget, and CLOSE_MAX_TRIS a
 	# model (a larger chain does not fit the engine's near cache well).
-	CLOSE_MAX_TRIS = 4000
+	CLOSE_MAX_TRIS = int(os.environ.get("LC_CLOSE_MAX_TRIS", "12000"))
 	LOD_UNITS_PER_METRIC = 320.0 / math.tan(math.radians(75.0 / 2.0)) / 100.0
 	close_models: dict[str, tuple[SourceMesh, float]] = {}
 	nodes = []
@@ -1208,6 +1211,10 @@ def bake_props(
 			mesh, ids = model_cache[model]
 			if len(full.tris) > spare:
 				continue
+			# The engine takes GC_PR_MAX_MODELS records: base models first,
+			# nearest close models while records last (more is "bad layout").
+			if len(close_models) >= GC_PR_MAX_MODELS - len(used_models) - 4:
+				break
 			dist = switch * LOD_UNITS_PER_METRIC if switch is not None else median_range
 			if dist <= 0.0 or reach[model] > dist:
 				continue  # the player never gets inside its range
