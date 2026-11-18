@@ -44,6 +44,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import re
 import struct
 import sys
@@ -210,6 +211,59 @@ def light_at(bsp: Bsp, f, base_pt) -> tuple[int, int, int]:
 		acc[1] += g * sc * w
 		acc[2] += b * sc * w
 	return (_light_texel(acc[0]), _light_texel(acc[1]), _light_texel(acc[2]))
+
+
+def pvs_decode_row(vis: bytes, ofs: int, visbytes: int) -> bytes:
+	"""One Source/Quake RLE PVS row (zero byte + run of zero bytes)."""
+	out = bytearray()
+	pos = ofs
+	while len(out) < visbytes:
+		if vis[pos]:
+			out.append(vis[pos])
+			pos += 1
+		else:
+			out += bytes(vis[pos + 1])
+			pos += 2
+	return bytes(out[:visbytes])
+
+
+def pvs_encode_row(row: bytes) -> bytes:
+	out = bytearray()
+	i = 0
+	while i < len(row):
+		if row[i]:
+			out.append(row[i])
+			i += 1
+			continue
+		run = 0
+		while i < len(row) and not row[i] and run < 255:
+			run += 1
+			i += 1
+		out += bytes((0, run))
+	return bytes(out)
+
+
+def pvs_merge_rows(rows: list, max_bits: int) -> list:
+	"""Replace rows that differ by at most max_bits clusters with their union.
+	A union only adds clusters, so the result is still a conservative PVS."""
+	if max_bits <= 0:
+		return rows
+	reps: list[int] = []  # union rows as ints
+	owner: dict[int, int] = {}
+	nbytes = next((len(r) for r in rows if r is not None), 0)
+	for i, r in enumerate(rows):
+		if r is None:
+			continue
+		v = int.from_bytes(r, "big")
+		for j, u in enumerate(reps):
+			if (u ^ v).bit_count() <= max_bits:
+				reps[j] = u | v
+				owner[i] = j
+				break
+		else:
+			owner[i] = len(reps)
+			reps.append(v)
+	return [None if r is None else reps[owner[i]].to_bytes(nbytes, "big") for i, r in enumerate(rows)]
 
 
 def rgb565(c) -> int:
@@ -1318,25 +1372,33 @@ def bake(map_bsp: Path, out_dir: Path, max_disp_power: int) -> None:
 		struct.pack_into(">ffff", plane_blob, pi * 16, *bsp.planes[planenum])
 
 	# --- PVS rows (Source RLE, PVS half of each cluster's offset pair) ----------
+	# Rows are decoded, rows within LC_PVS_MERGE differing clusters (default 8)
+	# are replaced by their union (only ever adds visible clusters, so nothing
+	# can vanish; costs a few frustum tests), then identical rows share one
+	# encoded copy through the directory. The runtime decoder is unchanged.
 	visbytes = (bsp.numclusters + 7) // 8
-	pvs_blob = bytearray()
-	pvs_dir = bytearray()
+	merge_bits = int(os.environ.get("LC_PVS_MERGE", "8"))
+	pvs_rows: list[bytes | None] = []
 	for cl in range(bsp.numclusters):
 		ofs = struct.unpack_from("<i", bsp.vis, 4 + cl * 8)[0]
 		if ofs < 0:
+			pvs_rows.append(None)
+			continue
+		pvs_rows.append(pvs_decode_row(bsp.vis, ofs, visbytes))
+	pvs_rows = pvs_merge_rows(pvs_rows, merge_bits)
+	pvs_blob = bytearray()
+	pvs_dir = bytearray()
+	pvs_shared: dict[bytes, int] = {}
+	raw_rle = 0
+	for row in pvs_rows:
+		if row is None:
 			pvs_dir += struct.pack(">I", 0xFFFFFFFF)
 			continue
-		pos = ofs
-		done = 0
-		while done < visbytes:
-			if bsp.vis[pos]:
-				pos += 1
-				done += 1
-			else:
-				done += bsp.vis[pos + 1]
-				pos += 2
-		pvs_dir += struct.pack(">I", len(pvs_blob))
-		pvs_blob += bsp.vis[ofs:pos]
+		if row not in pvs_shared:
+			pvs_shared[row] = len(pvs_blob)
+			pvs_blob += pvs_encode_row(row)
+		pvs_dir += struct.pack(">I", pvs_shared[row])
+	print(f"  pvs rows unique={len(pvs_shared)} of {sum(r is not None for r in pvs_rows)} (merge {merge_bits} clusters)")
 
 	# --- Assemble ---------------------------------------------------------------
 	order = sorted(chunks)
