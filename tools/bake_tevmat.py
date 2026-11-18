@@ -12,11 +12,10 @@ Ported so far:
         ST × scale via a texture matrix (no extra vertex data).
   $alphatest / $alphatestreference
       → CMPR 1-bit alpha + GX alpha compare.
-  $bumpmap (materials without an authored $detail)
-      → the normal map is lit once at bake time by the map's sun and stored
-        as a native-resolution, tileable 64² relief tile that rides the same
-        mod2x detail stage (×8 tiling). Sharp sun-lit grain on sand and rock
-        for one TEV stage and 5.4 KB, instead of per-pixel normal mapping.
+  $bumpmap without $envmap (rock / cliffs / monastery walls)
+      → shared 64² I8 height tiles (normal-map Z, or authored $parallaxmap).
+        Runtime embosses lit colour: lit × (0.5 + h(uv) − h(uv+d)) × 2 with
+        d = map-sun offset in UV space via a texture matrix (trailer GCeh).
   $envmap + $basealphaenvmapmask (metal / plaster / monastery frescos)
       → shared 64² I4 masks from the base texture alpha (CMPR alpha is 1-bit,
         so the mask cannot ride in the diffuse). Runtime adds sun × tint ×
@@ -37,11 +36,15 @@ GC_TEVMAT_MAX_MATS = 96
 GC_TEVMAT_MAX_DETAIL = 8
 GC_TEVMAT_REAL_DETAIL = 4  # slots kept for authored $detail textures
 GC_TEVMAT_MAX_ENVMASK = 8  # shared I4 masks for Source envmap alpha masks
+GC_TEVMAT_MAX_EMBOSS = 16  # shared I8 height tiles for cliff / rock emboss
 GC_TEVMAT_DETAIL_SIDE = 64
 GC_TEVMAT_DETAIL_BYTES = 4096 + 1024 + 256 + 64
 GC_TEVMAT_ENVMASK_BYTES = 2048  # 64² GX I4
+GC_TEVMAT_EMBOSS_BYTES = 4096  # 64² GX I8 (no mips)
 LAST_ENVMASKS: list[dict] = []  # filled by build_table, in mask index order
+LAST_EMBOSS: list[dict] = []  # filled by build_table, in height index order
 GC_TEVMAT_ENVMASK_MAGIC = b"GCem"
+GC_TEVMAT_EMBOSS_MAGIC = b"GCeh"
 
 F_DETAIL = 0x01
 F_ALPHATEST = 0x02
@@ -52,6 +55,8 @@ F_DECAL = 0x08
 # Soft decal: the atlas is opaque and its alpha is the separate I4 page
 # (media/da_<map>.bin); the engine blends instead of cutting out.
 F_SOFT = 0x10
+# $bumpmap without $envmap: Flipper emboss from a shared height tile.
+F_EMBOSS = 0x20
 
 
 def _num(val: str | None, default: float) -> float:
@@ -82,10 +87,9 @@ def classify(vmt: dict[str, str] | None) -> dict | None:
 		out["detail"] = _tex_path(detail)
 		out["detail_scale"] = max(0.05, min(255.0, _num(vmt.get("$detailscale"), 4.0)))
 		out["detail_factor"] = max(0.0, min(1.0, _num(vmt.get("$detailblendfactor"), 1.0)))
-	# No stand-in for $bumpmap here. An earlier version lit a 1/8 crop of the
-	# normal map with a fixed sun and tiled it 8x as a "detail": the crop is
-	# not tileable, so its seams drew a grid across the sand. Source uses the
-	# normal map for bumped lightmaps and the envmap, not as a detail layer.
+	# Cliff / rock $bumpmap without $envmap → emboss height (see F_EMBOSS).
+	# An earlier stand-in lit a 1/8 crop as mod2x detail; that punched white
+	# voids over lightmaps and is not used anymore.
 	if _num(vmt.get("$alphatest"), 0.0) >= 1.0:
 		out["flags"] |= F_ALPHATEST
 		out["alpharef"] = int(max(1, min(255, round(_num(vmt.get("$alphatestreference"), 0.5) * 255))))
@@ -103,7 +107,8 @@ def classify(vmt: dict[str, str] | None) -> dict | None:
 			out["flags"] |= F_ALPHATEST
 			out["alpharef"] = 96
 	env = (vmt.get("$envmap") or "").strip().lower()
-	if env and env not in ("0", '""', "none"):
+	has_env = bool(env) and env not in ("0", '""', "none")
+	if has_env:
 		# Lost Coast rocks and wet sand put the reflection mask in the normal
 		# map alpha. Source also supports a base texture alpha mask.
 		mask = ""
@@ -115,52 +120,83 @@ def classify(vmt: dict[str, str] | None) -> dict | None:
 		if mask:
 			out["flags"] |= F_ENVMASK
 			out["envmask"] = _tex_path(mask)
+	# Emboss from $bumpmap. Harbor cliffs keep $envmap for the additive
+	# specular pass but still need height relief on diffuse×LM. Water dudv
+	# bumps ride the separate water bake. Wet sand (IndTex) still embosses
+	# the diffuse base; the specular warp is a later additive pass.
+	bump = (vmt.get("$bumpmap") or "").strip()
+	if bump and not (vmt.get("$bottommaterial") or "").strip():
+		para = (vmt.get("$parallaxmap") or "").strip()
+		out["flags"] |= F_EMBOSS
+		if para:
+			out["emboss"] = _tex_path(para)
+			out["emboss_from_normal"] = False
+		else:
+			out["emboss"] = _tex_path(bump)
+			out["emboss_from_normal"] = True
 	return out if out["flags"] else None
 
 
-# $bumpmap → sun-lit relief tile.
-BUMP_PREFIX = "bump:"
-BUMP_TILING = 8  # relief tile repeats 8× per diffuse tile (64 px of a 512² normal map)
-BUMP_FACTOR = 0.85
 # d2_lostcoast env_sun: towards the sun is yaw 137°, 10° up. Floor texture
 # axes in Source are S=+x, T=-y, so tangent space L = (Lx, -Ly, Lz).
+# Runtime emboss uses the XY as a UV offset (texture matrix).
 _SUN_YAW = math.radians(137.0)
 _SUN_ELEV = math.radians(10.0)
 SUN_TANGENT = (
 	math.cos(_SUN_ELEV) * math.cos(_SUN_YAW),
 	-math.cos(_SUN_ELEV) * math.sin(_SUN_YAW),
-	# Grazing 10° sun over-darkens: lift so relief reads without crushing.
 	max(math.sin(_SUN_ELEV), 0.45),
 )
 
 
-def bump_relief_rgba(rgba: bytes, w: int, h: int) -> tuple[bytes, int, int]:
-	"""Light a normal map with the sun → tileable grey relief tile (RGBA)."""
-	side = max(16, min(w, h) // BUMP_TILING)
-	lx, ly, lz = SUN_TANGENT
-	ln = math.sqrt(lx * lx + ly * ly + lz * lz)
-	lx, ly, lz = lx / ln, ly / ln, lz / ln
+def bump_height_i8(rgba: bytes, w: int, h: int, from_normal: bool) -> bytes:
+	"""Resample a height or normal map to a 64² GX I8 height tile.
 
-	def shade(x: int, y: int) -> float:
-		i = ((y % h) * w + (x % w)) * 4
-		nx = rgba[i] / 127.5 - 1.0
-		ny = rgba[i + 1] / 127.5 - 1.0
-		nz = rgba[i + 2] / 127.5 - 1.0
-		return max(0.0, nx * lx + ny * ly + nz * lz)
-
-	# Crop one tile; cross-fade with a half-offset crop so edges wrap cleanly.
-	out = bytearray()
-	half = side // 2
+	Normal maps contribute their Z (blue) channel — a cheap stand-in for the
+	authored height Source keeps in $parallaxmap. Authored height / greyscale
+	maps use luminance. Values stay in 0..255 (not mod2x-centred): the
+	runtime emboss formula is lit × (0.5 + h0 − h1) × 2.
+	"""
+	side = GC_TEVMAT_DETAIL_SIDE
+	if w <= 0 or h <= 0 or len(rgba) != w * h * 4:
+		raise ValueError("invalid height/normal dimensions or RGBA data")
+	lum: list[int] = []
 	for y in range(side):
-		wy = min(y, side - 1 - y) / max(1.0, side / 4.0)
+		sy0, sy1 = y * h // side, max(y * h // side + 1, (y + 1) * h // side)
 		for x in range(side):
-			wx = min(x, side - 1 - x) / max(1.0, side / 4.0)
-			wgt = max(0.0, min(1.0, min(wx, wy)))
-			a = shade(x, y)
-			b = shade(x + half + side, y + half + side)
-			v = int(max(0, min(255, round((a * wgt + b * (1.0 - wgt)) * 255.0))))
-			out += bytes((v, v, v, 255))
-	return bytes(out), side, side
+			sx0, sx1 = x * w // side, max(x * w // side + 1, (x + 1) * w // side)
+			acc = 0.0
+			n = 0
+			for sy in range(sy0, sy1):
+				base = (sy * w + sx0) * 4
+				for _sx in range(sx0, sx1):
+					if from_normal:
+						# Tangent normals keep Z≈1 (flat blue). Emboss needs
+						# high-frequency height: the X/Y channels carry the
+						# rock grain, so their average stands in for height.
+						# Forward-differencing that along the sun offset still
+						# shades like a height field.
+						acc += 0.5 * (rgba[base] + rgba[base + 1])
+					else:
+						acc += (
+							rgba[base] * 0.299
+							+ rgba[base + 1] * 0.587
+							+ rgba[base + 2] * 0.114
+						)
+					base += 4
+					n += 1
+			lum.append(int(max(0, min(255, round(acc / max(1, n))))))
+	# Stretch contrast so cliff grain reads at 480p after the
+	# (0.5+h0-h1)×2 emboss; keep the mean near mid-grey for a neutral floor.
+	mean = sum(lum) / len(lum)
+	stretch = 2.0
+	lum = [
+		int(max(0, min(255, round(128.0 + (v - mean) * stretch))))
+		for v in lum
+	]
+	body = _i8_tiled(lum, side)
+	assert len(body) == GC_TEVMAT_EMBOSS_BYTES, len(body)
+	return body
 
 
 def _i8_tiled(lum: list[int], side: int) -> bytes:
@@ -314,6 +350,8 @@ def build_table(
 	use: dict[str, list[float]] = {}
 	area: dict[str, float] = {}
 	emask_area: dict[str, float] = {}
+	emboss_area: dict[str, float] = {}
+	emboss_from_normal: dict[str, bool] = {}
 	for mat, feat in mat_features.items():
 		if feat["flags"] & F_DETAIL:
 			use.setdefault(feat["detail"], []).append(feat["detail_factor"])
@@ -321,20 +359,28 @@ def build_table(
 		if feat["flags"] & F_ENVMASK:
 			em = feat["envmask"]
 			emask_area[em] = emask_area.get(em, 0.0) + (weights or {}).get(mat, 1.0)
+		if feat["flags"] & F_EMBOSS:
+			eh = feat["emboss"]
+			w = (weights or {}).get(mat, 1.0)
+			# Harbor cliffs are the visual target: boost rockwall / blendrock
+			# so monastery / metal variants don't fill the shared height quota.
+			ml = mat.lower()
+			if "rockwall" in ml or "blendrock" in ml or "/nature/rock" in ml:
+				w *= 4.0
+			emboss_area[eh] = emboss_area.get(eh, 0.0) + w
+			# Prefer "from normal" if any user of this tile says so.
+			emboss_from_normal[eh] = emboss_from_normal.get(eh, False) or bool(
+				feat.get("emboss_from_normal")
+			)
 	detail_idx: dict[str, int] = {}
 	detail_blobs: list[bytes] = []
 	n_real = 0
-	n_bump = 0
-	# Largest drawn area first; authored details and bump reliefs have separate quotas.
+	# Largest drawn area first; authored $detail only (bump relief retired).
 	for tex, factors in sorted(use.items(), key=lambda kv: (-area[kv[0]], kv[0])):
-		is_bump = tex.startswith(BUMP_PREFIX)
-		quota = GC_TEVMAT_MAX_DETAIL - GC_TEVMAT_REAL_DETAIL if is_bump else GC_TEVMAT_REAL_DETAIL
-		if (n_bump if is_bump else n_real) >= quota:
-			log.append(f"  tevmat: detail {tex} dropped (quota {quota})")
+		if n_real >= GC_TEVMAT_REAL_DETAIL:
+			log.append(f"  tevmat: detail {tex} dropped (quota {GC_TEVMAT_REAL_DETAIL})")
 			continue
-		got = load_rgba(tex[len(BUMP_PREFIX) :] if is_bump else tex)
-		if got is not None and is_bump:
-			got = bump_relief_rgba(*got)
+		got = load_rgba(tex)
 		if got is None:
 			log.append(f"  tevmat: detail {tex} missing")
 			continue
@@ -342,11 +388,11 @@ def build_table(
 		factor = sorted(factors)[len(factors) // 2]
 		detail_idx[tex] = len(detail_blobs)
 		detail_blobs.append(_detail_i8(rgba, w, h, factor))
-		if is_bump:
-			n_bump += 1
-		else:
-			n_real += 1
-		log.append(f"  tevmat: detail[{detail_idx[tex]}] {tex} {w}x{h} factor={factor:.2f} mats={len(factors)} area={area[tex]:.0f}")
+		n_real += 1
+		log.append(
+			f"  tevmat: detail[{detail_idx[tex]}] {tex} {w}x{h} "
+			f"factor={factor:.2f} mats={len(factors)} area={area[tex]:.0f}"
+		)
 
 	envmask_idx: dict[str, int] = {}
 	envmask_blobs: list[bytes] = []
@@ -370,6 +416,32 @@ def build_table(
 			f"area={emask_area[tex]:.0f}"
 		)
 
+	emboss_idx: dict[str, int] = {}
+	emboss_blobs: list[bytes] = []
+	del LAST_EMBOSS[:]
+	for tex, _area in sorted(emboss_area.items(), key=lambda kv: (-kv[1], kv[0])):
+		if len(emboss_blobs) >= GC_TEVMAT_MAX_EMBOSS:
+			log.append(f"  tevmat: emboss {tex} dropped (quota {GC_TEVMAT_MAX_EMBOSS})")
+			continue
+		got = load_rgba(tex)
+		if got is None:
+			log.append(f"  tevmat: emboss {tex} missing")
+			continue
+		rgba, w, h = got
+		from_n = emboss_from_normal.get(tex, True)
+		try:
+			blob = bump_height_i8(rgba, w, h, from_n)
+		except ValueError as exc:
+			log.append(f"  tevmat: emboss {tex} skip ({exc})")
+			continue
+		emboss_idx[tex] = len(emboss_blobs)
+		emboss_blobs.append(blob)
+		LAST_EMBOSS.append({"tex": tex, "from_normal": from_n})
+		log.append(
+			f"  tevmat: emboss[{emboss_idx[tex]}] {tex} {w}x{h} "
+			f"from_normal={int(from_n)} area={emboss_area[tex]:.0f}"
+		)
+
 	ids: dict[str, int] = {}
 	rec_ids: dict[bytes, int] = {}
 	recs = bytearray()
@@ -390,9 +462,22 @@ def build_table(
 				maskidx = envmask_idx[feat["envmask"]]
 			else:
 				flags &= ~F_ENVMASK
+		# Emboss height index: envmask byte when free, else the detail byte
+		# (cliff rocks with $envmap rarely also author $detail).
+		if flags & F_EMBOSS:
+			if feat["emboss"] not in emboss_idx:
+				flags &= ~F_EMBOSS
+			elif flags & F_ENVMASK:
+				if flags & F_DETAIL:
+					# Prefer authored detail; drop emboss on this rare combo.
+					flags &= ~F_EMBOSS
+				else:
+					didx = emboss_idx[feat["emboss"]]
+			else:
+				maskidx = emboss_idx[feat["emboss"]]
 		if not flags:
 			continue
-		# flags, detail idx, detail scale u16, alpharef, envmask idx, pad2
+		# flags, detail idx, detail scale u16, alpharef, envmask/emboss idx, pad2
 		rec = struct.pack(
 			">BBHBB2x", flags, didx, scale, feat.get("alpharef", 0), maskidx
 		)
@@ -416,6 +501,11 @@ def build_table(
 		body += GC_TEVMAT_ENVMASK_MAGIC + struct.pack(
 			">B3x", len(envmask_blobs)
 		) + b"".join(envmask_blobs)
+	if emboss_blobs:
+		# Trailer after envmasks (or details): runtime probes for GCeh.
+		body += GC_TEVMAT_EMBOSS_MAGIC + struct.pack(
+			">B3x", len(emboss_blobs)
+		) + b"".join(emboss_blobs)
 	return ids, body, log
 
 

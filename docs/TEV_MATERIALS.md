@@ -42,7 +42,7 @@ Disable at runtime with `-gcnotevmat`.
 | `$alphatest`, `$alphatestreference` | **done** | CMPR 1-bit alpha, `GX_SetAlphaCompare(GEQUAL, ref)`, Z after texture | 0 stages |
 | `$envmap` + `$normalmapalphaenvmapmask` + `$bumpmap` (wet sand) | done (engine, sand only) | sky/sun texture × (mask × `$envmaptint`) added to lit colour, sky ST warped by the normal map through an indirect stage | +2 stages, 1 ind stage |
 | `$envmap` + `$basealphaenvmapmask` (metal, plaster, frescos) | **done** | additive pass: sun disc × `$envmaptint` × shared 64² I4 mask from base alpha (CMPR alpha is 1-bit); trailer `GCem` in `tevmat.gcm` (max 8 masks) | +2 stages, 2 KB per mask |
-| `$bumpmap` without envmap (rock, cliffs) | next | emboss: `lit × (0.5 + h(uv) − h(uv + d)) × 2` with `h` = normal-map-derived height (I8), `d` = per-face sun direction in tangent space loaded as a texture matrix | +2 stages, +1 texgen |
+| `$bumpmap` (rock, cliffs; including `$envmap` rocks) | **done** | emboss: `lit × (0.5 + h(uv) − h(uv + d)) × 2` with `h` = shared 64² I8 (`GCeh`; normal X/Y average or `$parallaxmap`), `d` = map-sun UV offset via texture matrix. Wet-sand IndTex specular stays a later add. | +4 stages (save lit + h0 + h1 + mul), +2 texgens |
 | WorldVertexTransition `$basetexture2` | **done** | second alpha-blended draw of `$basetexture2` weighted by displacement vertex alpha (world DL v2) | +1 draw on blend batches |
 | `$parallaxmap` | not planned | no cheap fixed-function equivalent; visually minor at 480p | — |
 | HDR bloom / tonemap | **done** | `r_gx_bloom.c`: EFB → half-res I8 through the copy box filter, 8-tap TEV blur − threshold, × warm tint, additive | 1 EFB copy + 1 fullscreen quad (10 stages), 75 KB BSS |
