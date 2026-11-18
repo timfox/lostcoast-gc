@@ -197,6 +197,37 @@ def bake(out: Path, names_wanted: list[str]) -> None:
 			if b not in used:
 				used.append(b)
 		gest.append((g, dur, keep, frames))
+	# Look-at pose parameters (head_yaw, head_pitch, spine_yaw, body_yaw): each
+	# is a three-way blend sequence of delta poses at the parameter's low end,
+	# middle and high end. Kept as three-frame tracks "look_<pose>" whose
+	# cycle is the parameter's place in its range. A GoldSrc bone controller
+	# cannot stand in for these: it adds to one Euler angle of one bone, and
+	# these bones rest far from zero (the pelvis at roll 88, yaw 90), so the
+	# turn came out about the wrong axis.
+	from bake_lostcoast_studio import LOOK_POSES, _pose_params
+
+	params = [p[0] for p in _pose_params(anim.d)]
+	for pose in LOOK_POSES:
+		if pose not in params:
+			continue
+		pi = params.index(pose)
+		si = next((i for i, q in enumerate(anim.am.seqs) if q.paramindex and q.paramindex[0] == pi and len(q.anims) == 3), None)
+		if si is None:
+			continue
+		w = anim.seq_weights(si)
+		frames = []
+		for ai in anim.am.seqs[si].anims:
+			fr = anim.am.anims[ai].frames[0]
+			frames.append([qscale(fr[b][1], w[b]) if b in fr and w[b] > 0 else ID for b in range(anim.nb)])
+		keep = [b for b in range(anim.nb)
+			if not any(x in bnames[b].lower() for x in SKIP_BONES)
+			and max(2 * math.degrees(math.acos(min(1.0, abs(fr[b][3])))) for fr in frames) >= MIN_DEG]
+		if not keep:
+			continue
+		for b in keep:
+			if b not in used:
+				used.append(b)
+		gest.append(("look_" + pose, 0.0, keep, frames))
 	if len(used) > 255:
 		raise SystemExit("too many gesture bones")
 	names_ofs = 32

@@ -404,9 +404,107 @@ def vtx_switch_points(vtx: bytes) -> list[float]:
 	return [struct.unpack_from("<iif", vtx, mh + lodoff + i * 12)[2] for i in range(nlods)]
 
 
+def _texture_names(mdl: bytes) -> list[str]:
+	numtex, texidx = struct.unpack_from("<ii", mdl, 204)
+	return [_cstr(mdl, texidx + t * 64 + struct.unpack_from("<i", mdl, texidx + t * 64)[0]) for t in range(numtex)]
+
+
+def eye_materials(mdl: bytes) -> set[int]:
+	return {i for i, n in enumerate(_texture_names(mdl)) if n.lower().startswith("eyeball")}
+
+
+def _eyeballs(mdl: bytes) -> list[dict]:
+	"""mstudioeyeball_t of body part 0, model 0: bone-space origin, up, forward."""
+	_nbp, bpidx = struct.unpack_from("<ii", mdl, 232)
+	mh = bpidx + struct.unpack_from("<i", mdl, bpidx + 12)[0]
+	ne, ei = struct.unpack_from("<ii", mdl, mh + 100)
+	out = []
+	for k in range(ne):
+		o = mh + ei + k * 172
+		out.append({
+			"bone": struct.unpack_from("<i", mdl, o + 4)[0],
+			"org": struct.unpack_from("<3f", mdl, o + 8),
+			"up": struct.unpack_from("<3f", mdl, o + 28),
+			"forward": struct.unpack_from("<3f", mdl, o + 40),
+			"iris_scale": struct.unpack_from("<f", mdl, o + 60)[0],
+		})
+	return out
+
+
+def eye_texture(mdl, vvd, vtx, bones, material: int, w: int, h: int, rgba: bytes, iris) -> bytes:
+	"""The "eyes" shader on one texture: $iris projected onto the sclera.
+
+	Source projects the iris from the eyeball's own frame (studiorender
+	R_StudioEyeballPosition): u, v = 0.5 -+ (p - org) . right, up * iris_scale
+	on the half of the ball that faces forward. Flipper draws the eyeball with
+	one texture, so the projection is done here, texel by texel, through the
+	eyeball mesh's own texture coordinates. The eyes look straight ahead.
+	"""
+	tris, vstart, _ = load_mesh(mdl, vvd, vtx, 0)
+	tris = [t for t in tris if t[0] == material]
+	balls = _eyeballs(mdl)
+	if not tris or not balls or iris is None:
+		return rgba
+	vert = {}
+	for t in tris:
+		for v in t[1:]:
+			if v not in vert:
+				_w, _b, _nb, p, _n, uv = ss.vvd_vertex(vvd, vstart, v)
+				vert[v] = (p, uv)
+
+	def local(ball, p):
+		return ss.mat34_xform(bones[ball["bone"]].pose_to_bone, p)
+
+	cen = [sum(vert[v][0][a] for v in vert) / len(vert) for a in range(3)]
+	ball = min(balls, key=lambda e: math.dist(local(e, cen), e["org"]))
+	f, up = ball["forward"], ball["up"]
+	# The mesh is only the cap that shows; the record's forward points into
+	# the head on this model, so face the projection the way the cap faces.
+	lc = local(ball, cen)
+	if sum((lc[i] - ball["org"][i]) * f[i] for i in range(3)) < 0.0:
+		f = tuple(-x for x in f)
+	right = (f[1] * up[2] - f[2] * up[1], f[2] * up[0] - f[0] * up[2], f[0] * up[1] - f[1] * up[0])
+	out = bytearray(rgba)
+	for _m, a, b, c in tris:
+		(pa, ta), (pb, tb), (pc, tc) = vert[a], vert[b], vert[c]
+		xs = [t[0] * w for t in (ta, tb, tc)]
+		ys = [t[1] * h for t in (ta, tb, tc)]
+		den = (ys[1] - ys[2]) * (xs[0] - xs[2]) + (xs[2] - xs[1]) * (ys[0] - ys[2])
+		if abs(den) < 1e-9:
+			continue
+		for y in range(max(0, int(min(ys))), min(h, int(max(ys)) + 1)):
+			for x in range(max(0, int(min(xs))), min(w, int(max(xs)) + 1)):
+				px, py = x + 0.5, y + 0.5
+				l0 = ((ys[1] - ys[2]) * (px - xs[2]) + (xs[2] - xs[1]) * (py - ys[2])) / den
+				l1 = ((ys[2] - ys[0]) * (px - xs[2]) + (xs[0] - xs[2]) * (py - ys[2])) / den
+				l2 = 1.0 - l0 - l1
+				if min(l0, l1, l2) < -0.02:
+					continue
+				p = local(ball, tuple(pa[i] * l0 + pb[i] * l1 + pc[i] * l2 for i in range(3)))
+				d = tuple(p[i] - ball["org"][i] for i in range(3))
+				if sum(d[i] * f[i] for i in range(3)) <= 0.0:
+					continue
+				iu = 0.5 - sum(d[i] * right[i] for i in range(3)) * ball["iris_scale"]
+				iv = 0.5 - sum(d[i] * up[i] for i in range(3)) * ball["iris_scale"]
+				if not (0.0 <= iu < 1.0 and 0.0 <= iv < 1.0):
+					continue
+				io = (int(iv * iris.height) * iris.width + int(iu * iris.width)) * 4
+				al = iris.rgba[io + 3] / 255.0
+				o = (y * w + x) * 4
+				for ch in range(3):
+					out[o + ch] = int(out[o + ch] * (1.0 - al) + iris.rgba[io + ch] * al + 0.5)
+	return bytes(out)
+
+
 def lod_geometry(mdl, vvd, vtx, lod, bones):
 	"""Tris (material, a, b, c) over local verts; verts in their bone's space."""
 	tris, vstart, used = load_mesh(mdl, vvd, vtx, lod)
+	# Source drops the eyeball meshes from LOD 3 down and leaves the dark
+	# sockets painted on the head. The actor is one LOD for every distance,
+	# so it keeps LOD 0's eyeballs (32 triangles each).
+	eyes = eye_materials(mdl)
+	if eyes and not any(t[0] in eyes for t in tris):
+		tris = tris + [t for t in load_mesh(mdl, vvd, vtx, 0)[0] if t[0] in eyes]
 	ids = sorted({v for t in tris for v in t[1:]})
 	vmap = {v: i for i, v in enumerate(ids)}
 	pos, nrm, uv, vb = [], [], [], []
@@ -810,6 +908,9 @@ def convert(vpks, name: str, lod: int, tex_max: int, out_dir: Path, flip: bool, 
 			flags |= 0x0020  # STUDIO_NF_ADDITIVE
 		nw, nh = pow2_fit(w, h, side)
 		rgba = resize_rgba(rgba, w, h, nw, nh)
+		if kv.get("__shader") == "eyes" and kv.get("$iris") and name in ACTOR_LODS:
+			iris = read_first(vpks, "materials/" + kv["$iris"].replace("\\", "/").strip() + ".vtf")
+			rgba = eye_texture(mdl, vvd, vtx, bones, t, nw, nh, rgba, decode_vtf(iris, max_side=64) if iris else None)
 		idx, pal = palettise(rgba, nw, nh, bool(flags & 0x0040))
 		textures.append((tname[-63:], flags, nw, nh, idx, pal))
 		print(f"  skin {tname}: {nw}x{nh} from {rel}")
