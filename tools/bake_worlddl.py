@@ -374,28 +374,97 @@ LM_REQUESTS: dict[int, list[int]] = {}
 LM_COUNTER = [0]
 
 
+# Pages are shared (LC_LM_SHARE, default on): each chunk's cells are packed
+# into the smallest rectangle they fit (squares, largest first, on shelves of
+# the best width), and those rectangles are packed into common 32 x 32 pages
+# (first-fit decreasing height). A chunk still binds one page, so several
+# chunks can sample one page without any runtime change. On d2_lostcoast every
+# chunk's cells at full size fit in about 180 pages, where one page a chunk
+# needed 1361 and only the 512 largest chunks got one.
+LM_SHARE: dict[int, tuple[int, int, int, int, int]] = {}  # chunk page -> (shared page, ox, oy, w, h)
+
+
+def _pack_squares(sides: list[int]):
+	"""Smallest-area shelf packing of squares inside 32 x 32: (rects, w, h)."""
+	best = None
+	order = sorted(range(len(sides)), key=lambda i: -sides[i])
+	for width in range(2, 33):
+		rects = [None] * len(sides)
+		x = y = row_h = used_w = 0
+		ok = True
+		for i in order:
+			w = sides[i]
+			if w > width:
+				ok = False
+				break
+			if x + w > width:
+				x, y, row_h = 0, y + row_h, 0
+			if y + w > 32:
+				ok = False
+				break
+			rects[i] = (x, y, w, w)
+			x += w
+			row_h = max(row_h, w)
+			used_w = max(used_w, x)
+		if ok and (best is None or used_w * (y + row_h) < best[1] * best[2]):
+			best = (rects, used_w, y + row_h)
+	return best
+
+
 def plan_lightmap_pages() -> dict:
 	plan = {}
+	groups = {}
 	for page, sides in LM_REQUESTS.items():
+		got = None
 		for scale in (1.0, 0.875, 0.75, 0.625, 0.5, 0.4375, 0.375, 0.3125, 0.25, 0.1875, 0.125):
-			want = [max(2, int(round(sd * scale))) for sd in sides]
+			got = _pack_squares([max(2, int(round(sd * scale))) for sd in sides])
+			if got:
+				break
+		if got is None:
+			# Even the smallest cells overflow one page: hand out what fits.
+			want = [max(2, int(round(sd * 0.125))) for sd in sides]
 			order = sorted(range(len(want)), key=lambda i: -want[i])
 			rects = [None] * len(want)
 			x = y = row_h = 0
-			ok = True
 			for i in order:
 				w = want[i]
 				if x + w > 32:
 					x, y, row_h = 0, y + row_h, 0
 				if y + w > 32:
-					ok = False
 					break
 				rects[i] = (x, y, w, w)
 				x += w
 				row_h = max(row_h, w)
-			if ok:
+			got = (rects, 32, 32)
+		plan[page] = got[0]
+		groups[page] = (got[1], got[2])
+	LM_SHARE.clear()
+	if os.environ.get("LC_LM_SHARE", "1") == "0":
+		for n, page in enumerate(sorted(groups)):
+			LM_SHARE[page] = (n, 0, 0, 32, 32)
+		return plan
+	shelves: list[list] = []  # per shared page: [next_y, [[y, h, next_x], ...]]
+	for page in sorted(groups, key=lambda pg: (-groups[pg][1], -groups[pg][0], pg)):
+		w, h = groups[page]
+		spot = None
+		for si, (top, rows) in enumerate(shelves):
+			for row in rows:
+				if h <= row[1] and row[2] + w <= 32:
+					spot = (si, row[2], row[0])
+					row[2] += w
+					break
+			if spot is None and top + h <= 32:
+				rows.append([top, h, w])
+				shelves[si][0] = top + h
+				spot = (si, 0, top)
+			if spot:
 				break
-		plan[page] = rects
+		if spot is None:
+			shelves.append([h, [[0, h, w]]])
+			spot = (len(shelves) - 1, 0, 0)
+		si, ox, oy = spot
+		LM_SHARE[page] = (si, ox, oy, w, h)
+		plan[page] = [None if r is None else (r[0] + ox, r[1] + oy, r[2], r[3]) for r in plan[page]]
 	return plan
 
 
@@ -1426,24 +1495,52 @@ def bake(map_bsp: Path, out_dir: Path, max_disp_power: int) -> None:
 				else:
 					_c += 8 * bsp.vis[_p + 1]
 					_p += 2
+	# Lightmap pages: shared pages (see LM_SHARE) in order of first use. A
+	# chunk draws with its page when the page made the 512-page budget.
+	# Which chunks get a lightmap: by default the same ones as when every
+	# chunk needed its own page (the 512 widest, span >= 256), so the picture
+	# is unchanged and only the bytes shrink. LC_LM_ALL=1 lights every chunk
+	# (the rest otherwise draw with vertex light); it still fits in ~220 pages.
+	lm_all = os.environ.get("LC_LM_ALL", "0") == "1"
 	ranked = []
 	for cl, ch in chunks.items():
 		if not ch.pos or not ch.lm.used or ch.lm.failed or cl in sky_clusters:
 			continue
 		span = max(ch.maxs[a] - ch.mins[a] for a in range(3))
-		if span >= 256:
+		if lm_all or span >= 256:
 			ranked.append((span, cl))
 	ranked.sort(reverse=True)
-	for _span, cl in ranked[:512]:
-		chunks[cl].lm_keep = True
+	lm_wanted = {cl for _span, cl in (ranked if lm_all else ranked[:512])}
 	lm_pages = bytearray()
+	shared_index: dict[int, int] = {}
+	shared_pix: dict[int, list] = {}
+	n_lit = n_chunks_lm = 0
 	for cl in order:
-		if getattr(chunks[cl], "lm_keep", False):
-			chunks[cl].lm_index = len(lm_pages) // 2048
-			page = rgb565_page(chunks[cl].lm.pix)
-			assert len(page) == 2048, len(page)
-			lm_pages += page
-	LM_PAGES_LEFT = 512 - min(512, len(ranked))
+		ch = chunks[cl]
+		if cl not in lm_wanted:
+			continue
+		n_chunks_lm += 1
+		share = LM_SHARE.get(ch.lm.index)
+		if share is None:
+			continue
+		si, ox, oy, gw, gh = share
+		if si not in shared_index:
+			if len(shared_index) >= 512:
+				continue
+			shared_index[si] = len(shared_index)
+			shared_pix[si] = [[(128, 128, 128) for _ in range(32)] for _ in range(32)]
+		dst = shared_pix[si]
+		for yy in range(oy, oy + gh):
+			dst[yy][ox:ox + gw] = ch.lm.pix[yy][ox:ox + gw]
+		ch.lm_keep = True
+		ch.lm_index = shared_index[si]
+		n_lit += 1
+	for si, n in sorted(shared_index.items(), key=lambda kv: kv[1]):
+		page = rgb565_page(shared_pix[si])
+		assert len(page) == 2048, len(page)
+		lm_pages += page
+	LM_PAGES_LEFT = 512 - len(shared_index)
+	print(f"  lightmap pages: {len(shared_index)} shared by {n_lit} of {n_chunks_lm} lightmapped chunks")
 	chunk_blobs = [chunks[c].encode() for c in order]
 	# The (cubemap, plane axis) pairs the reflective batches look up, for
 	# tools/bake_lostcoast_cubemaps.py (media/cm_<map>.gcm holds only these).
