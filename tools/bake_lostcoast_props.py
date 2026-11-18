@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import os
 import re
 import struct
 import sys
@@ -26,7 +27,12 @@ from vpk import open_vpk_roots, read_first  # noqa: E402
 from vtf import decode_vtf  # noqa: E402
 
 GC_PR_MAGIC = b"GCpr"
-GC_PR_VERSION = 7
+# v8 = v7 + draw commands in GX_VTXFMT1: a command whose texture coordinates
+# all lie in 0..255/256 is written with u8 S and T (the same 1/256 step as the
+# s16 ones) and opcode | 1, 9 bytes a vertex instead of 11, bit-identical on
+# screen. LC_PROP_UV8=0 bakes v7 for engines older than v8 support.
+GC_PR_UV8 = os.environ.get("LC_PROP_UV8", "1") != "0"
+GC_PR_VERSION = 8 if GC_PR_UV8 else 7
 GC_PR_MAX_TRIS = 65535
 GC_PR_MODEL_TRIS = 112000  # unique model triangles (about 23 B each in ARAM; 2.6 MB of the 16)
 GC_PR_CMD_VERTS = 1200   # vertices in one draw command (even)
@@ -1261,6 +1267,13 @@ def bake_props(
 			# half as much crosses ARAM for the rest.
 			cmds = []  # (bytes, nverts, ntris)
 			loose = []
+
+			def command(op, verts):
+				"""One GX draw command; GX_VTXFMT1 (u8 S/T) when every vertex fits."""
+				# s16 S/T big-endian at bytes 7 and 9: a zero high byte is 0..255.
+				if GC_PR_UV8 and all(v[7] == 0 and v[9] == 0 for v in verts):
+					return struct.pack(">BH", op | 1, len(verts)) + b"".join(v[:7] + v[8:9] + v[10:11] for v in verts)
+				return struct.pack(">BH", op, len(verts)) + b"".join(verts)
 			for strip in _stripify(by_mat[mid]):
 				if len(strip) == 3:
 					loose.append(strip)
@@ -1268,13 +1281,11 @@ def bake_props(
 				k = 0
 				while k + 2 < len(strip):
 					part = strip[k:k + GC_PR_CMD_VERTS]
-					cmds.append((struct.pack(">BH", 0x98, len(part)) + b"".join(part),
-						len(part), len(part) - 2))
+					cmds.append((command(0x98, part), len(part), len(part) - 2))
 					k += GC_PR_CMD_VERTS - 2  # even step keeps the winding
 			for k in range(0, len(loose), GC_PR_CMD_VERTS // 3):
 				part = loose[k:k + GC_PR_CMD_VERTS // 3]
-				cmds.append((struct.pack(">BH", 0x90, len(part) * 3) + b"".join(b"".join(t) for t in part),
-					len(part) * 3, len(part)))
+				cmds.append((command(0x90, [v for t in part for v in t]), len(part) * 3, len(part)))
 			# A real GX display list per piece: draw commands back to back,
 			# NOP padding. Resident pieces are called in place; streamed
 			# ones are copied into the FIFO.
