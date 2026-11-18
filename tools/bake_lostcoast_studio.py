@@ -1521,7 +1521,70 @@ def npc_spawns(src_bsp: Path, have: set[str]) -> list[dict]:
 			out.append({"raw": {"classname": "path_corner", "targetname": pc["targetname"],
 				"target": pc.get("target", ""), "origin": pc.get("origin", "0 0 0")}})
 			c = pc.get("target", "")
+	cannon = _cannon_keys(src_bsp, ents, by_name)
+	if cannon:
+		out.append({"raw": cannon})
 	return out
+
+
+def _cannon_keys(src_bsp: Path, ents: list[dict], by_name: dict) -> dict | None:
+	"""The monastery gun shelling the town, as one lc_cannon entity.
+
+	In the map: a trigger_once in the monastery enables logic_timer
+	cannon_fire_timer (a random 30..60 s) and fires one shot at once; each
+	tick logic_case cannon_fire_random picks one of six relays, each of which
+	force-spawns an env_headcrabcanister template that flies from its
+	LaunchPositionName (the gun) to its own origin in the town. A later
+	trigger disables the timer. The engine has no entity I/O, so the chain
+	is flattened into keys (lostcoast_npcs.cpp CLCCannon).
+	"""
+	timer = next((e for e in ents if e.get("classname") == "logic_timer" and "cannon_fire_random" in str(e.get("__outputs"))), None)
+	if not timer:
+		return None
+	tname = timer.get("targetname", "")
+
+	def box_of(inp: str):
+		for e in ents:
+			for _k, v in _outputs(e):
+				parts = [x.strip() for x in v.split(",")]
+				if len(parts) > 1 and parts[0].lower() == tname.lower() and parts[1].lower() == inp:
+					b = _brush_bounds(src_bsp, e)
+					if b:
+						return e, b
+		return None, None
+
+	on_e, on_box = box_of("enable")
+	_off_e, off_box = box_of("disable")
+	if not on_box:
+		return None
+	keys = {"classname": "lc_cannon", "origin": timer.get("origin", "0 0 0"),
+		"lc_start": " ".join(f"{c:g}" for c in on_box),
+		"lc_interval": f"{float(timer.get('LowerRandomBound', 30)):g} {float(timer.get('UpperRandomBound', 60)):g}"}
+	if off_box:
+		keys["lc_stop"] = " ".join(f"{c:g}" for c in off_box)
+	first = 0
+	shots = 0
+	for n in range(1, 9):
+		relay = next(iter(by_name.get(f"cannon_fire_{n}_relay", [])), None)
+		if not relay:
+			continue
+		tmpl = next((v.split(",")[0].strip() for _k, v in _outputs(relay) if "forcespawn" in v.lower()), "")
+		pt = next(iter(by_name.get(tmpl.lower(), [])), None)
+		can = next(iter(by_name.get((pt or {}).get("Template01", "").lower(), [])), None)
+		gun = next(iter(by_name.get((can or {}).get("LaunchPositionName", "").lower(), [])), None)
+		if not (can and gun):
+			continue
+		ang = can.get("angles", "0 0 0").split()
+		keys[f"lc_shot{n}"] = (f"{gun.get('origin', '0 0 0')} {can.get('origin', '0 0 0')} {float(ang[0]):g} {float(ang[1]):g} "
+			f"{float(can.get('FlightTime', 4)):g} {float(can.get('FlightSpeed', 3000)):g}")
+		shots += 1
+		if on_e and any(f"cannon_fire_{n}_relay" in v for _k, v in _outputs(on_e)):
+			first = n
+	if not shots:
+		return None
+	keys["lc_first"] = str(first)
+	print(f"  cannon: {shots} canister shots, timer {keys['lc_interval']} s, first shot {first}")
+	return keys
 
 
 def seq_index(name: str, label: str) -> int:

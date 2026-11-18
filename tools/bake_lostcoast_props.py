@@ -807,6 +807,10 @@ def _wrap_uv(u: float, v: float) -> tuple[float, float]:
 	return u - math.floor(u), v - math.floor(v)
 
 
+# (model, origin) -> the point the map lights that static prop from
+LIGHTING_ORIGIN: dict[tuple, tuple] = {}
+
+
 def _static_props(bsp: bytes) -> list[tuple[str, tuple, tuple]]:
 	"""sprp v5. Coast rocks and the monastery shell are not entities."""
 	if len(bsp) < 8 + 36 * 16:
@@ -856,6 +860,11 @@ def _static_props(bsp: bytes) -> list[tuple[str, tuple, tuple]]:
 		x, y, z, pitch, yaw, roll, ptype = struct.unpack_from("<6fH", body, at)
 		if ptype >= len(names):
 			continue
+		# StaticPropLump_t: Flags at +31, LightingOrigin at +44. A prop with
+		# STATIC_PROP_USE_LIGHTING_ORIGIN (an info_lighting in Hammer) is lit
+		# from that point, not from its own middle.
+		if at + 56 <= len(body) and body[at + 31] & 0x02:
+			LIGHTING_ORIGIN[(_normalize_model(names[ptype].replace("\\", "/")), (x, y, z))] = struct.unpack_from("<3f", body, at + 44)
 		model = names[ptype].replace("\\", "/")
 		low = model.lower()
 		if _skip_model(model) or "card" in low:
@@ -1388,6 +1397,7 @@ def bake_props(
 	from bake_worlddl import LIGHT_EXPOSURE
 	_lc = LightCache(Path(map_bsp))
 	n_sunlit = 0
+	n_lit_origin = 0
 	light_blob = bytearray()
 	sun_dir = (0.0, 0.0, 1.0)
 	close_link: dict = {}  # model record -> (close model record, range); model name -> done
@@ -1416,6 +1426,13 @@ def bake_props(
 		c16 = lambda v: int(max(-32767, min(32767, round(v))))
 		a16 = lambda d: ((int(round(d * 65536.0 / 360.0)) + 32768) & 0xFFFF) - 32768
 		_ctr = tuple(0.5 * (mins[k] + maxs[k]) for k in range(3))
+		# The map's own lighting point for this prop, where it names one. The
+		# monastery's pillars and a gutter have their middles inside solid
+		# (no ambient light, no sky: they came out black); the mapper lit
+		# them from a point in the open.
+		if (model, origin) in LIGHTING_ORIGIN:
+			_ctr = LIGHTING_ORIGIN[(model, origin)]
+			n_lit_origin += 1
 		_cube, _sun, _sdir = lighting_at(_lc, _ctr, height=0.0)
 		_lit = [sum(f[k] for f in _cube) / 6.0 + (0.25 * _sun[k] if _sun else 0.0) for k in range(3)]
 		n_sunlit += 1 if _sun else 0
@@ -1492,7 +1509,8 @@ def bake_props(
 	for _mi in sorted(env_mats):
 		inst_blob += struct.pack(">BB3B3x", _mi, env_mats[_mi][0], *env_mats[_mi][1])
 	inst_blob += b"\0" * (-len(inst_blob) % 32)
-	print(f"  prop lighting: {n_inst} instances, {n_sunlit} reach the sun, sun toward {tuple(round(c, 3) for c in sun_dir)}")
+	print(f"  prop lighting: {n_inst} instances, {n_sunlit} reach the sun, {n_lit_origin} lit from the map's lighting origin, "
+		f"sun toward {tuple(round(c, 3) for c in sun_dir)}")
 	inst_ofs = 32
 	models_ofs = inst_ofs + len(inst_blob)
 	dl_base = models_ofs + len(model_blob)
