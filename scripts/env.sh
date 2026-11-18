@@ -7,7 +7,42 @@ set -euo pipefail
 LCGC_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export LCGC_ROOT
 
+# The engine a plain build uses. LCGC_ENGINE wins when set. Otherwise the
+# checkout kept for these builds (it carries a .lcgc-managed file and is
+# moved to origin/master below), and only without it the old `engine` link.
+LCGC_ENGINE_MANAGED="${LCGC_ENGINE_MANAGED:-/home/tim/Desktop/lcgc-engine-master}"
+if [[ -z "${LCGC_ENGINE:-}" && -f "$LCGC_ENGINE_MANAGED/.lcgc-managed" ]]; then
+	export LCGC_ENGINE="$LCGC_ENGINE_MANAGED"
+fi
 export LCGC_ENGINE="${LCGC_ENGINE:-$LCGC_ROOT/engine}"
+# Populated third-party tree the managed checkout links to.
+LCGC_ENGINE_3RDPARTY="${LCGC_ENGINE_3RDPARTY:-/home/tim/Desktop/lcgc-integrate/3rdparty}"
+# The managed checkout is moved to origin/master before every build, so a
+# plain build always uses the current engine. Skipped when the fetch fails
+# (offline: build what is there) or when someone has edited tracked files in
+# it. LCGC_ENGINE_NO_REFRESH=1 turns it off.
+if [[ -f "$LCGC_ENGINE/.lcgc-managed" && "${LCGC_ENGINE_NO_REFRESH:-0}" != "1" ]]; then
+	if git -C "$LCGC_ENGINE" fetch -q origin master 2>/dev/null; then
+		# Its third-party tree is a link to a populated copy, so git lists
+		# the submodule paths as deleted; anything else modified is real work.
+		if [[ -z "$(git -C "$LCGC_ENGINE" status --porcelain --untracked-files=no 2>/dev/null | grep -v ' 3rdparty/' || true)" ]]; then
+			if [[ "$(git -C "$LCGC_ENGINE" rev-parse HEAD)" != "$(git -C "$LCGC_ENGINE" rev-parse origin/master)" ]]; then
+				git -C "$LCGC_ENGINE" checkout -q --detach origin/master 2>/dev/null || true
+				echo "engine now at: $(git -C "$LCGC_ENGINE" log -1 --format='%h %s' | cut -c1-90)" >&2
+			fi
+			# A checkout can put a plain 3rdparty directory back in place of
+			# the link (it holds no submodule content). Set it aside under a
+			# dated name and relink; nothing is deleted.
+			if [[ -d "$LCGC_ENGINE/3rdparty" && ! -L "$LCGC_ENGINE/3rdparty" && -d "$LCGC_ENGINE_3RDPARTY" ]]; then
+				mv "$LCGC_ENGINE/3rdparty" "$LCGC_ENGINE/3rdparty.checkout.$(date +%Y%m%d-%H%M%S)"
+				ln -s "$LCGC_ENGINE_3RDPARTY" "$LCGC_ENGINE/3rdparty"
+			fi
+		else
+			echo "WARNING: $LCGC_ENGINE has local changes; not moving it to origin/master" >&2
+		fi
+	fi
+fi
+
 # A build against an engine checkout that is far behind master gives today's
 # bake to an old renderer (the default `engine` link sat 486 commits behind
 # for days). Say so; fetch nothing, change nothing.
