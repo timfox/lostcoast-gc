@@ -37,6 +37,7 @@ class Event:
 	relative_tags: list = field(default_factory=list)
 	timing_tags: list = field(default_factory=list)
 	abs_tags: list = field(default_factory=list)
+	flex: list = field(default_factory=list)
 	caption: str = ""
 
 
@@ -137,14 +138,17 @@ def _parse(b: bytes, strings: list[str]) -> Scene:
 		if r.take("b"):
 			s(), s()
 		for _ in range(r.take("B")):  # flex animation tracks
-			s()
+			# one flex controller over the event: samples of (time s, value
+			# 0..1 of the track's min..max); a stereo ("combo") track adds
+			# left/right balance samples (0 = all left, 1 = all right)
+			name = s()
 			fl = r.take("B")
-			r.take("ff")
-			for _ in range(r.take("h")):
-				r.take("fBH")
+			lo, hi = r.take("ff")
+			amount = [(t, v / 255.0) for t, v, _curve in (r.take("fBH") for _ in range(r.take("h")))]
+			balance = []
 			if fl & 2:
-				for _ in range(r.take("H")):
-					r.take("fBH")
+				balance = [(t, v / 255.0) for t, v, _curve in (r.take("fBH") for _ in range(r.take("H")))]
+			ev.flex.append({"name": name, "active": bool(fl & 1), "min": lo, "max": hi, "amount": amount, "balance": balance})
 		if ev.type == "loop":
 			r.take("b")
 		if ev.type == "speak":

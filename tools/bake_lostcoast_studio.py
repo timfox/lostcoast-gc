@@ -617,14 +617,15 @@ def write_face(face, out_path: Path, order, ids, vb, bones, pf: int) -> None:
 	phoneme being spoken and the next, and adds the shapes to the position
 	array (r_gx_face.c).
 
-	  0   "GCFA", u16 version (1), u16 nshape
+	  0   "GCFA", u16 version (2), u16 nshape
 	  8   u16 nslot, u16 nphon, u8 shift, 3 x 0
 	  16  u32 slots_ofs, u32 dir_ofs, u32 phon_ofs, u32 size
 	  slots: nslot x u16: index into LOD 0's position array
 	  dir:   nshape x 8: u32 ofs, u16 count, u16 0
 	  entries: count x 6: u16 slot table index, s8 dx, dy, dz (position
 	         units >> shift), u8 0
-	  phon:  nphon x (u16 code, nshape x u8 weight * 32), padded to even
+	  phon:  nphon x (u16 code, nshape x s8 (weight - resting weight) * 16),
+	         padded to even
 	"""
 	fx, phon = face
 	# shapes: (descriptor that weighs it, ramp) -> {vvd id: [dx, dy, dz]} in model space
@@ -640,8 +641,21 @@ def write_face(face, out_path: Path, order, ids, vb, bones, pf: int) -> None:
 				for a in range(3):
 					o[a] += d[a] * k
 	weights = {code: fx.weights(vals) for code, (_n, vals) in phon.items()}
-	keys = [k for k in shapes if any(fx.ramp(k[1], w[k[0]]) > 0.004 for w in weights.values())]
-	peak = {k: max(fx.ramp(k[1], w[k[0]]) for w in weights.values()) for k in keys}
+	# Scenes drive the other controllers too (brows, eyelids, cheeks: the
+	# flex animation tracks, bake_lostcoast_actors.py), so a shape any single
+	# controller reaches at full strength is kept as well.
+	solo = [fx.weights({name: 1.0}) for name, _mn, _mx in fx.controllers]
+	reach = list(weights.values()) + solo
+	# The rules give some shapes weight with every controller at zero (the
+	# eyelids' neutral shapes). The mesh as it stands is that face, so a
+	# shape counts by how far it is from that resting weight, either way.
+	rest = fx.weights({})
+
+	def rel(k, w):
+		return fx.ramp(k[1], w[k[0]]) - fx.ramp(k[1], rest[k[0]])
+
+	keys = [k for k in shapes if any(abs(rel(k, w)) > 0.004 for w in reach)]
+	peak = {k: max(abs(rel(k, w)) for w in reach) for k in keys}
 	slots_of: dict[int, list[int]] = {}
 	local_of = {vid: i for i, vid in enumerate(ids)}
 	for si, v in enumerate(order):
@@ -687,12 +701,15 @@ def write_face(face, out_path: Path, order, ids, vb, bones, pf: int) -> None:
 	ph = bytearray()
 	for code in sorted(weights):
 		ph += struct.pack(">H", code)
-		ph += bytes(max(0, min(255, int(round(fx.ramp(k[1], weights[code][k[0]]) * 32.0)))) for k in keys)
+		ph += struct.pack(f">{len(keys)}b", *(max(-127, min(127, int(round(rel(k, weights[code]) * 16.0)))) for k in keys))
 		if len(ph) & 1:
 			ph += b"\0"
 	size = phon_ofs + len(ph)
-	hdr = struct.pack(">4sHHHHB3xIIII", b"GCFA", 1, len(keys), len(slot_list), len(weights), shift, slots_ofs, dir_ofs, phon_ofs, size)
+	hdr = struct.pack(">4sHHHHB3xIIII", b"GCFA", 2, len(keys), len(slot_list), len(weights), shift, slots_ofs, dir_ofs, phon_ofs, size)
 	out_path.write_bytes(hdr + b"".join(struct.pack(">H", si) for si in slot_list) + bytes(dirb) + bytes(body) + bytes(ph))
+	# the shapes in file order, for the scene bake to weigh its face tracks by
+	import json
+	out_path.with_suffix(".gcf.json").write_text(json.dumps([[k[0], list(k[1])] for k in keys]))
 	print(f"  {out_path.name}: {len(keys)} shapes, {len(slot_list)} vertex slots, {sum(len(e) for e in raw)} offsets, "
 		f"{len(weights)} phonemes, shift {shift}, {size} bytes")
 

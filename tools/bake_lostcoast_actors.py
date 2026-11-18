@@ -128,12 +128,72 @@ def wave_of(name: str, scripts: dict) -> tuple[str, float, float] | None:
 	return (w, sound_volume(kv), sound_atten(kv)) if w else None
 
 
+FACE_HZ = 10.0
+FACE_TRACKS: dict[str, bytes] = {}  # scene stem -> .gft file
+_FACE = None  # (Flexes, shape keys of <actor>.gcf), loaded once
+
+
+def _curve(samples, t: float) -> float:
+	"""A flex track at event time t: straight between its samples (Faceposer
+	draws a spline through them; they sit about half a second apart)."""
+	if not samples:
+		return 0.0
+	if t <= samples[0][0]:
+		return samples[0][1]
+	for (t0, v0), (t1, v1) in zip(samples, samples[1:]):
+		if t <= t1:
+			return v0 + (v1 - v0) * (t - t0) / (t1 - t0) if t1 > t0 else v1
+	return samples[-1][1]
+
+
+def face_track(events, face) -> tuple[bytes, float, float] | None:
+	"""A scene's flex animation (brows, eyelids, cheeks ...) as weights of the
+	actor's face shapes, FACE_HZ times a second: the scene's controller
+	curves through the model's flex rules, exactly as the lip-sync bake runs
+	phonemes through them. Stereo tracks split by their balance curve
+	(0.5 = both sides full).
+
+	.gft, big-endian: "GCFT", u16 version (2), u16 nshape, u16 nsamples,
+	u16 hz * 256, then nsamples x nshape x s8 ((weight - resting weight) * 16).
+	"""
+	fx, keys = face
+	names = {c[0] for c in fx.controllers}
+	t0 = min(e.start for e in events)
+	t1 = max(e.end for e in events)
+	n = max(2, int((t1 - t0) * FACE_HZ) + 1)
+	rows = bytearray()
+	rest = fx.weights({})
+	for i in range(n):
+		t = t0 + i / FACE_HZ
+		vals: dict[str, float] = {}
+		for e in events:
+			if not (e.start <= t <= e.end):
+				continue
+			for tr in e.flex:
+				if not tr["active"] or not tr["amount"]:
+					continue
+				v = _curve(tr["amount"], t - e.start)
+				if tr["balance"] or ("left_" + tr["name"]) in names:
+					b = _curve(tr["balance"], t - e.start) if tr["balance"] else 0.5
+					sides = (("left_", 1.0 if b <= 0.5 else 2.0 * (1.0 - b)), ("right_", 1.0 if b >= 0.5 else 2.0 * b))
+					for side, k in sides:
+						if side + tr["name"] in names:
+							vals[side + tr["name"]] = max(vals.get(side + tr["name"], 0.0), v * k)
+				elif tr["name"] in names:
+					vals[tr["name"]] = max(vals.get(tr["name"], 0.0), v)
+		w = fx.weights(vals)
+		rows += struct.pack(f">{len(keys)}b", *(max(-127, min(127,
+			int(round((fx.ramp(k[1], w[k[0]]) - fx.ramp(k[1], rest[k[0]])) * 16.0)))) for k in keys))
+	return struct.pack(">4sHHHH", b"GCFT", 2, len(keys), n, int(FACE_HZ * 256)) + bytes(rows), t0, t1
+
+
 def bake_scene(img: SceneImage, vcd: str, actor: str, scripts: dict, waves: set[str]) -> str | None:
 	sc = img.scene(vcd)
 	if not sc:
 		return None
 	lines = [f"// {vcd} (scenes.image), actor {actor}"]
 	end = 0.0
+	face_events = []
 	for e in sc.events:
 		if e.type == "stoppoint":
 			end = e.start
@@ -170,6 +230,15 @@ def bake_scene(img: SceneImage, vcd: str, actor: str, scripts: dict, waves: set[
 					lines.append(f"sequence {e.start:.2f} {e.end:.2f} {e.param1}")
 				elif e.type == "firetrigger":
 					lines.append(f"trigger {e.start:.2f} {e.param1}")
+				elif e.type == "flexanimation" and e.flex and e.name.lower() != "head":
+					# (the "head" tracks turn the head bone, not the face)
+					face_events.append(e)
+	if face_events and _FACE:
+		got = face_track(face_events, _FACE)
+		if got:
+			stem = Path(vcd).stem.lower()
+			FACE_TRACKS[stem] = got[0]
+			lines.append(f"flex {got[1]:.2f} {got[2]:.2f} scripts/lc/{stem}.gft")
 	lines.append(f"end {end:.2f}")
 	return "\n".join(lines) + "\n"
 
@@ -224,6 +293,17 @@ def main() -> int:
 	(out / "scripts" / "lc").mkdir(parents=True, exist_ok=True)
 
 	img = SceneImage(read_first(vpks, "scenes/scenes.image"))
+	# the fisherman's face shapes, as the character bake wrote them
+	global _FACE
+	keyfile = out / "models" / "lc" / "fisherman.gcf.json"
+	if keyfile.exists():
+		import json
+
+		import source_flex
+
+		fb = "models/lostcoast/fisherman/fisherman"
+		_FACE = (source_flex.Flexes(read_first(vpks, fb + ".mdl"), read_first(vpks, fb + ".vvd")),
+			[(d, tuple(t)) for d, t in json.loads(keyfile.read_text())])
 	scripts = soundscripts(vpks)
 	waves: set[str] = set()
 
@@ -287,6 +367,10 @@ def main() -> int:
 		dst.write_bytes(pcm)
 		total += len(pcm)
 	print(f"  voice: {len(waves)} waves, {total // 1024} KB at {VOICE_RATE} Hz")
+	for stem, data in sorted(FACE_TRACKS.items()):
+		(out / "scripts" / "lc" / f"{stem}.gft").write_bytes(data)
+	if FACE_TRACKS:
+		print(f"  face tracks: {len(FACE_TRACKS)} scenes, {sum(len(d) for d in FACE_TRACKS.values()) // 1024} KB")
 	return 0
 
 
