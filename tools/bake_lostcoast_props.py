@@ -1534,14 +1534,18 @@ def bake_props(
 		# term along the sun. base = the four side faces of the cube; the
 		# others are what +Z and the sun add on top of it. The underside
 		# (-Z face) is left at the base.
-		_g = lambda v: 255.0 * pow(max(0.0, v) * LIGHT_EXPOSURE, 1.0 / 2.2)
+		# At half scale, drawn x2 by the engine (light record byte 9 = 2), as
+		# the world's lightmap texels are: a sunlit wall reaches twice its
+		# texture there, and props that stopped at once stood dim on it
+		# (the rocks on the cliff ledge, the boats).
+		_g = lambda v: 127.5 * pow(max(0.0, v) * LIGHT_EXPOSURE, 1.0 / 2.2)
 		_side = [sum(_cube[f][k] for f in range(4)) / 4.0 for k in range(3)]
 		_avg = [sum(f[k] for f in _cube) / 6.0 for k in range(3)]
 		_b = lambda v: int(max(0, min(255, round(v))))
 		_lt_base = [_b(_g(_side[k])) for k in range(3)]
 		_lt_up = [_b(_g(_cube[4][k]) - _g(_side[k])) for k in range(3)]
 		_lt_sun = [_b(_g(_avg[k] + _sun[k]) - _g(_avg[k])) if _sun else 0 for k in range(3)]
-		light_blob += bytes(_lt_base + _lt_up + _lt_sun + [0, 0, 0])
+		light_blob += bytes(_lt_base + _lt_up + _lt_sun + [2, 0, 0])
 		sun_dir = _sdir
 		# Low byte 1 marks the colour as set (the engine's own sample otherwise).
 		inst_lit = (_tex[0] << 24) | (_tex[1] << 16) | (_tex[2] << 8) | 1
