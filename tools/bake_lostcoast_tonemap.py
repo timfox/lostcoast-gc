@@ -44,6 +44,13 @@ DEFAULT_MIN, DEFAULT_MAX = 0.5, 2.0  # mat_autoexposure_min / _max
 # At 1 the 8-bit texture clips only where the HDR sky is over 1 (the sun's
 # glare), and scales up to 4.6 stay inside the engine's factor of 2.
 SKY_EXPOSURE = 1.0
+# Which scale the sky textures count as for the engine. Measured, like the
+# world's used to be: in both retail stills of the cove (playtests/reference/
+# retail-hd-cove.png and retail-cove.jpg) the sky around the sun is blown out
+# (216 to 252 of 255) over sand at 100 to 109. With the world at 100 our sky
+# sat at 199, drawn at the same scale as the world; retail's sky is drawn
+# 1.7 times brighter in light than that.
+SKY_COUNTS_AS = SKY_EXPOSURE / 1.7
 # The world is baked as gamma( light x LIGHT_EXPOSURE ), so the baked picture
 # stands for tonemap scale LIGHT_EXPOSURE. It used to be counted as half of
 # that (1.4), fitted to one retail still while the engine's exposure left the
@@ -134,7 +141,7 @@ def main() -> None:
 			apply(kv, ("OnMapSpawn", "OnNewGame"))
 	print(f"  limits at map spawn: {start['min']} .. {start['max']}")
 	out = args.out / "media" / f"tm_{args.map.stem.lower()}.bin"
-	out.write_bytes(struct.pack(">4sHHffff", b"GCtm", 1, len(recs), LIGHT_EXPOSURE / WORLD_LIGHT_UNITS, start["min"], start["max"], SKY_EXPOSURE) + b"".join(recs))
+	out.write_bytes(struct.pack(">4sHHffff", b"GCtm", 1, len(recs), LIGHT_EXPOSURE / WORLD_LIGHT_UNITS, start["min"], start["max"], SKY_COUNTS_AS) + b"".join(recs))
 	print(f"  wrote {out} volumes={len(recs)} baked picture = scale {LIGHT_EXPOSURE / WORLD_LIGHT_UNITS}, sky baked at {SKY_EXPOSURE}")
 
 
