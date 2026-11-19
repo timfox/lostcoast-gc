@@ -25,6 +25,7 @@ from bake_lostcoast_map import rgba_to_cmpr_mips, write_gcwt  # noqa: E402
 from source_mdl import SourceMesh, angle_matrix, load_source_mesh, transform_point  # noqa: E402
 from vpk import open_vpk_roots, read_first  # noqa: E402
 from vtf import decode_vtf  # noqa: E402
+import mesh_simplify  # noqa: E402
 
 GC_PR_MAGIC = b"GCpr"
 # v8 = v7 + draw commands in GX_VTXFMT1: a command whose texture coordinates
@@ -599,14 +600,7 @@ def _simplify(
 	# Weld vertices on a grid, finest grid that fits the budget. Picking a
 	# subset of triangles (the old path for boats, NPCs and most props)
 	# met the budget by leaving holes in every mesh.
-	best = (positions, uvs, tris, mats)
-	for div in (160, 128, 96, 80, 64, 56, 48, 40, 32, 28, 24, 20, 18, 16, 14, 12, 10, 8, 6, 5, 4, 3):
-		clustered = _cluster_tris(positions, uvs, tris, mats, div)
-		best = clustered
-		if len(clustered[2]) <= max_tris:
-			return clustered
-	pos, uv, kept, kmats = best
-	return _decimate_tris(pos, uv, kept, kmats, max_tris, spread=False)
+	return mesh_simplify.simplify(positions, uvs, tris, mats, max_tris)
 
 
 def _cstr(buf: bytes, off: int) -> str:
@@ -1391,21 +1385,21 @@ def bake_props(
 		far = None
 		# At most 96 triangles: a far instance is under 5 % of the view, and
 		# the whole region has to fit in about 250 KB of MEM1.
-		target = max(8, min(96, len(mesh.tris) // 8))
+		target = max(8, min(78, len(mesh.tris) // 8))
 		if any(k in str(key).lower() for k in (
 			"village", "shipwreck", "refinery", "monastery01", "dome", "drydock",
 			"boat_fishing", "dock_", "bridge", "destroyed", "cloister",
 		)):
 			# Landmarks stay readable across the harbor on their far chain.
-			target = max(target, min(800, len(mesh.tris) // 4))
+			target = max(target, min(620, len(mesh.tris) // 4))
 		if len(mesh.tris) > 16:
-			for div in (48, 40, 32, 28, 24, 20, 16, 14, 12, 10, 8, 6, 5, 4, 3):
-				lp, lu, lt, lm = _cluster_tris(pts, mesh.uvs, mesh.tris, mesh.tri_mat, div)
-				if 0 < len(lt) <= target or (div == 3 and lt):
-					# The coarsest grid is taken even when it is over the
-					# target: a full copy here cost 400 KB.
-					far = emit_pieces(lp, lu, lt, lm, ids, q, far_blob, piece_flags=pf)
-					break
+			# Edge collapse by quadric error. The grid weld this replaces
+			# moved every vertex to its cell's average: the dry-docked
+			# boat across the harbor came out with a lumpy hull and a
+			# notch at the waterline.
+			lp, lu, lt, lm = mesh_simplify.simplify(pts, mesh.uvs, mesh.tris, mesh.tri_mat, target)
+			if lt:
+				far = emit_pieces(lp, lu, lt, lm, ids, q, far_blob, piece_flags=pf)
 		if far is None:
 			far = emit_pieces(pts, mesh.uvs, mesh.tris, mesh.tri_mat, ids, q, far_blob, piece_flags=pf)
 		model_index[key] = len(model_recs)
