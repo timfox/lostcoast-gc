@@ -36,6 +36,12 @@ GC_TEVMAT_MAX_MATS = 96
 GC_TEVMAT_MAX_DETAIL = 8
 GC_TEVMAT_REAL_DETAIL = 4  # slots kept for authored $detail textures
 GC_TEVMAT_MAX_ENVMASK = 8  # shared I4 masks for Source envmap alpha masks
+# Past those, 32x32 masks (512 bytes) in a second table: the church's frescoes
+# and walls each carry their own mask, nineteen more than the 64x64 table
+# holds, and a material whose mask is not in a table gets no reflection at
+# all (the frescoes' gold sheen). Mask index 8 and up is the small table.
+GC_TEVMAT_MAX_ENVMASK_SMALL = 24
+GC_TEVMAT_ENVMASK_SMALL_MAGIC = b"GCes"
 GC_TEVMAT_MAX_EMBOSS = 16  # shared I8 height tiles for cliff / rock emboss
 GC_TEVMAT_DETAIL_SIDE = 64
 GC_TEVMAT_DETAIL_BYTES = 4096 + 1024 + 256 + 64
@@ -256,9 +262,8 @@ def normal_xy_ia8(rgba: bytes, w: int, h: int, side: int = 64) -> bytes:
 	return bytes(out)
 
 
-def _envmask_i4(rgba: bytes, w: int, h: int) -> bytes:
+def _envmask_i4(rgba: bytes, w: int, h: int, side: int = GC_TEVMAT_DETAIL_SIDE) -> bytes:
 	"""Bake Source's authored envmap mask to a compact, high-contrast I4 map."""
-	side = GC_TEVMAT_DETAIL_SIDE
 	lum: list[int] = []
 	for y in range(side):
 		sy0 = y * h // side
@@ -279,7 +284,7 @@ def _envmask_i4(rgba: bytes, w: int, h: int) -> bytes:
 	# tint in linear light and the engine keeps that product linear.
 	lum = [int(round(255.0 * (value / 255.0) ** 2.0)) for value in lum]
 	body = _i4_tiled(lum, side)
-	assert len(body) == GC_TEVMAT_ENVMASK_BYTES, len(body)
+	assert len(body) == side * side // 2, len(body)
 	return body
 
 
@@ -396,10 +401,24 @@ def build_table(
 
 	envmask_idx: dict[str, int] = {}
 	envmask_blobs: list[bytes] = []
+	envmask_small: list[bytes] = []
 	del LAST_ENVMASKS[:]
 	for tex, _area in sorted(emask_area.items(), key=lambda kv: (-kv[1], kv[0])):
 		if len(envmask_blobs) >= GC_TEVMAT_MAX_ENVMASK:
-			log.append(f"  tevmat: envmask {tex} dropped (quota {GC_TEVMAT_MAX_ENVMASK})")
+			if len(envmask_small) >= GC_TEVMAT_MAX_ENVMASK_SMALL:
+				log.append(f"  tevmat: envmask {tex} dropped (quota {GC_TEVMAT_MAX_ENVMASK} + {GC_TEVMAT_MAX_ENVMASK_SMALL})")
+				continue
+			got = load_rgba(tex)
+			if got is None:
+				log.append(f"  tevmat: envmask {tex} missing")
+				continue
+			rgba, w, h = got
+			envmask_idx[tex] = GC_TEVMAT_MAX_ENVMASK + len(envmask_small)
+			envmask_small.append(_envmask_i4(rgba, w, h, 32))
+			# No normal map from the small table (bake_lostcoast_envnormals
+			# indexes the 64x64 one).
+			LAST_ENVMASKS.append({"tex": tex, "normal": False})
+			log.append(f"  tevmat: envmask[{envmask_idx[tex]}] {tex} {w}x{h} -> 32x32 area={emask_area[tex]:.0f}")
 			continue
 		got = load_rgba(tex)
 		if got is None:
@@ -506,6 +525,11 @@ def build_table(
 		body += GC_TEVMAT_EMBOSS_MAGIC + struct.pack(
 			">B3x", len(emboss_blobs)
 		) + b"".join(emboss_blobs)
+	if envmask_small:
+		# Last: an engine that does not know it stops reading here.
+		body += GC_TEVMAT_ENVMASK_SMALL_MAGIC + struct.pack(
+			">B3x", len(envmask_small)
+		) + b"".join(envmask_small)
 	return ids, body, log
 
 
