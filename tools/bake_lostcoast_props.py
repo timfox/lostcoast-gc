@@ -1193,6 +1193,29 @@ def bake_props(
 				continue
 			d = float(np.sqrt(((node_arr - np.array(origin)) ** 2).sum(axis=1)).min())
 			reach[model] = min(reach.get(model, 1e9), d)
+		def _wall_range(model, full, within):
+			"""(range, nearest) from the foot of the box for a prop over 400
+			units in radius, or None."""
+			best = None
+			for m2, origin, angles in props:
+				if m2 != model:
+					continue
+				xf = angle_matrix(*angles)
+				P = np.array([transform_point(xf, origin, p) for p in full.positions])
+				mid = np.array([(P[:, 0].min() + P[:, 0].max()) / 2, (P[:, 1].min() + P[:, 1].max()) / 2, P[:, 2].min() + 8.0])
+				if float(np.sqrt(((P - mid) ** 2).sum(axis=1)).max()) < 400.0:
+					return None
+				S = P[:: max(1, len(P) // 800)]
+				ds = np.sqrt(((node_arr[:, None, :] - S[None, :, :]) ** 2).sum(axis=2)).min(axis=1)
+				dc = np.sqrt(((node_arr - mid) ** 2).sum(axis=1))
+				sel = ds < within
+				if not sel.any():
+					continue
+				# close_dist8 is a byte of 8 units.
+				got = (min(2032.0, float(dc[sel].max()) + 16.0), float(dc.min()))
+				best = got if best is None else (max(best[0], got[0]), min(best[1], got[1]))
+			return best
+
 		# First pass: every candidate with its range. A prop Source gives no
 		# LODs (the monastery pillars, gutters, altar) has no switch point:
 		# Source draws it whole at any distance. Those take the median range
@@ -1242,10 +1265,22 @@ def bake_props(
 			# whole in every harbor frame it cost the 60 there.
 			near = reach[model] <= NEAR_REACH
 			dist = switch * LOD_UNITS_PER_METRIC if switch is not None else (reach[model] + median_range if near and reach[model] > median_range else median_range)
+			# A building-sized prop without LODs (the monastery itself, 10150
+			# triangles, 1733 units across, hung from an origin 2100 units
+			# above the nearest ground): the distance to its origin says
+			# nothing about how close the player gets to its walls, and he
+			# climbs the cliff 52 units from them looking at 1594 triangles.
+			# Its range, measured as the engine does from the foot of its
+			# box, reaches every ground node within NEAR_REACH of its surface
+			# (the median range left out the cliff stairs right under the
+			# walls, 1900 units from the foot of the box).
+			big = _wall_range(model, full, NEAR_REACH) if switch is None else None
+			if big is not None:
+				dist, reach[model] = big
 			# A full model that stays on out to a long range is in most frames
 			# of its area: shipwreck_part03 (4837 triangles inside 834 units)
 			# took two harbor windows from 60 to 55 fps.
-			if dist > MAX_RANGE and len(full.tris) > 2000:
+			if big is None and dist > MAX_RANGE and len(full.tris) > 2000:
 				print(f"  no close model for {model}: {len(full.tris)} tris out to {dist:.0f} units costs the frame rate")
 				continue
 			if dist <= 0.0 or reach[model] > dist:
