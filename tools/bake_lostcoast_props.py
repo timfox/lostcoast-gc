@@ -161,7 +161,13 @@ GC_PR_PIECE_TRIS = 510  # one piece = 32 B header + verts, fits the 16 KB bounce
 GC_PR_MAX_INST = 512
 GC_PR_MAX_MODELS = 224  # engine GC_PROP_MAX_MODELS (192 before xash3d-gc close-models-rank)
 GC_PR_MAX_MAT = 127
-PROP_CLASSNAMES = {"prop_physics", "prop_dynamic", "prop_static"}
+# prop_door_rotating: the two front doors of the church. Left out, the
+# doorway was a bare hole in the wall; they are placed as the map spawns them
+# (ajar, see spawnpos below).
+PROP_CLASSNAMES = {"prop_physics", "prop_dynamic", "prop_static", "prop_door_rotating"}
+# Body group choice per model, where the map makes one: a door's "hardware"
+# key picks its handle (body part 1). Both church doors ask for the same.
+MODEL_BODY: dict[str, list[int]] = {}
 # CapFaces lean stand-ins: Source NPCs / canisters have no GoldSrc LINK_ENTITY,
 # so they bake into the GCpr pack as posed meshes (same path as boats/rocks).
 NPC_CLASSNAMES = {
@@ -918,10 +924,16 @@ def bake_props(
 			cls = cur.get("classname", "")
 			model = cur.get("model", "")
 			if cls in PROP_CLASSNAMES and model and not _skip_model(model):
+				if cls == "prop_door_rotating" and cur.get("hardware", "").isdigit():
+					MODEL_BODY[_normalize_model(model)] = [0, int(cur["hardware"])]
 				props.append((
 					_normalize_model(model),
 					_parse_vec(cur.get("origin", "0 0 0")),
-					_parse_vec(cur.get("angles", "0 0 0")),
+					# A door that spawns ajar (spawnpos 3) stands at its
+					# ajarangles: the church doors are open when the player
+					# arrives, 109 and 265 degrees against 90 and 270 closed.
+					_parse_vec(cur.get("ajarangles", "0 0 0") if cls == "prop_door_rotating"
+						and cur.get("spawnpos") == "3" and "ajarangles" in cur else cur.get("angles", "0 0 0")),
 				))
 			elif cls in NPC_CLASSNAMES:
 				# Honor an explicit model (super soldier, etc.); else default.
@@ -1070,7 +1082,7 @@ def bake_props(
 		lods = (0, 1, 2) if "fisherman" in model.lower() else (2, 1, 0)
 		for lod in lods:
 			try:
-				mesh = load_source_mesh(mdl, vvd, vtx, lod=lod)
+				mesh = load_source_mesh(mdl, vvd, vtx, lod=lod, body=MODEL_BODY.get(model))
 			except Exception as exc:  # noqa: BLE001
 				print(f"  skip parse {model} lod{lod}: {exc}")
 				mesh = None
@@ -1085,7 +1097,7 @@ def bake_props(
 		# LOD 0.
 		if lod != 0:
 			try:
-				full = load_source_mesh(mdl, vvd, vtx, lod=0)
+				full = load_source_mesh(mdl, vvd, vtx, lod=0, body=MODEL_BODY.get(model))
 			except Exception:  # noqa: BLE001
 				full = None
 			lost = (set(full.tri_mat) - set(mesh.tri_mat)) if full and full.tris else set()
@@ -1233,7 +1245,7 @@ def bake_props(
 			vvd = read_first(vpks, base + ".vvd")
 			vtx = read_first(vpks, base + ".dx90.vtx") or read_first(vpks, base + ".dx80.vtx")
 			try:
-				full = load_source_mesh(mdl, vvd, vtx, lod=0)
+				full = load_source_mesh(mdl, vvd, vtx, lod=0, body=MODEL_BODY.get(model))
 				switch = lod_switch_point(vtx, 1)
 			except Exception:  # noqa: BLE001
 				continue
@@ -1241,7 +1253,7 @@ def bake_props(
 				# Too large for the near cache: Source's next level instead,
 				# out to where Source itself would leave it.
 				try:
-					lod1 = load_source_mesh(mdl, vvd, vtx, lod=1)
+					lod1 = load_source_mesh(mdl, vvd, vtx, lod=1, body=MODEL_BODY.get(model))
 					sw2 = lod_switch_point(vtx, 2)
 				except Exception:  # noqa: BLE001
 					lod1 = None

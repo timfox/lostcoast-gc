@@ -43,12 +43,15 @@ def _vvd_lod_map(vvd: bytes, target_lod: int) -> list[int]:
 	return ids
 
 
-def _mdl_mesh_vertex_offsets(mdl: bytes) -> list[int]:
-	"""Per-mesh vertexoffset into the model's VVD stream (studiohdr).
+def _mdl_mesh_vertex_offsets(mdl: bytes) -> list[list[list[int]]]:
+	"""Per body part, per model, per mesh: the mesh's first vertex in the VVD.
 
-	VTX origMeshVertID is mesh-local; add this offset before the VVD lod map.
-	Without it, lower-body meshes (legs) remap onto the head and the figure
-	reads as a spiked upper-body blob.
+	VTX origMeshVertID is mesh-local. A mesh starts at its model's vertex
+	base (mstudiomodel_t.vertexindex, in bytes of 48-byte vertices) plus its
+	own vertexoffset within the model. Without it, lower-body meshes (legs)
+	remap onto the head and the figure reads as a spiked upper-body blob;
+	and without the model base every model after the first (the handles of
+	door01_left, a body group) indexed the door leaf's vertices.
 	"""
 	if len(mdl) < 240 or mdl[:4] != b"IDST":
 		return []
@@ -56,23 +59,28 @@ def _mdl_mesh_vertex_offsets(mdl: bytes) -> list[int]:
 	numbodyparts, bodypartindex = struct.unpack_from("<ii", mdl, 232)
 	if not (1 <= numbodyparts <= 32 and 0 < bodypartindex < len(mdl)):
 		return []
-	offsets: list[int] = []
+	parts: list[list[list[int]]] = []
 	for bp in range(numbodyparts):
 		base = bodypartindex + bp * 16
+		models: list[list[int]] = []
+		parts.append(models)
 		if base + 16 > len(mdl):
-			break
+			continue
 		_nameindex, nummodels, _bbase, modelindex = struct.unpack_from("<iiii", mdl, base)
 		if not (1 <= nummodels <= 16):
 			continue
 		for mi in range(nummodels):
 			mh = base + modelindex + mi * 148
-			if mh + 88 > len(mdl):
+			offsets: list[int] = []
+			models.append(offsets)
+			if mh + 92 > len(mdl):
 				continue
-			_typ, _radius, nummeshes, meshindex, numvertices, _vi, _ti = struct.unpack_from(
+			_typ, _radius, nummeshes, meshindex, numvertices, vertexindex, _ti = struct.unpack_from(
 				"<ifiiiii", mdl, mh + 64,
 			)
 			if not (1 <= nummeshes <= 64 and 0 < meshindex < len(mdl)):
 				continue
+			model_base = vertexindex // 48 if vertexindex > 0 else 0
 			for mesh_i in range(nummeshes):
 				msh = mh + meshindex + mesh_i * 116
 				if msh + 16 > len(mdl):
@@ -81,10 +89,10 @@ def _mdl_mesh_vertex_offsets(mdl: bytes) -> list[int]:
 					"<iiii", mdl, msh,
 				)
 				if 0 <= vertexoffset <= numvertices and 0 <= numverts_m <= numvertices:
-					offsets.append(vertexoffset)
+					offsets.append(model_base + vertexoffset)
 				else:
-					offsets.append(0)
-	return offsets
+					offsets.append(model_base)
+	return parts
 
 
 def _strip_triangles(indices: list[int], flags: int) -> list[tuple[int, int, int]]:
@@ -120,8 +128,11 @@ def lod_switch_point(vtx: bytes, lod: int = 1) -> float | None:
 	return best
 
 
-def load_source_mesh(mdl: bytes, vvd: bytes, vtx: bytes, lod: int = 2) -> SourceMesh:
-	"""Return triangle mesh for the requested LOD (clamped to available)."""
+def load_source_mesh(mdl: bytes, vvd: bytes, vtx: bytes, lod: int = 2, body: list[int] | None = None) -> SourceMesh:
+	"""Return triangle mesh for the requested LOD (clamped to available).
+
+	The models of a body part are alternatives (a door's handle styles): one
+	is drawn, `body[part]` or the first."""
 	if vvd[:4] != b"IDSV":
 		raise ValueError("not a VVD")
 	num_lod_verts = struct.unpack_from("<8i", vvd, 16)
@@ -164,7 +175,8 @@ def load_source_mesh(mdl: bytes, vvd: bytes, vtx: bytes, lod: int = 2) -> Source
 	for bp in range(num_body_parts):
 		bp_base = body_part_offset + bp * 8
 		num_models, model_offset = struct.unpack_from("<ii", vtx, bp_base)
-		for mi in range(num_models):
+		pick = body[bp] if body and bp < len(body) and 0 <= body[bp] < num_models else 0
+		for mi in range(pick, min(pick + 1, num_models)):
 			mh = bp_base + model_offset + mi * 8
 			m_num_lods, lod_offset = struct.unpack_from("<ii", vtx, mh)
 			use_lod = min(target_lod, m_num_lods - 1)
@@ -173,7 +185,10 @@ def load_source_mesh(mdl: bytes, vvd: bytes, vtx: bytes, lod: int = 2) -> Source
 			for mesh_i in range(num_meshes):
 				meshh = lodh + mesh_offset + mesh_i * 9
 				num_strip_groups, strip_group_off, _flags = struct.unpack_from("<iiB", vtx, meshh)
-				vbase = mesh_voff[mesh_i] if mesh_i < len(mesh_voff) else 0
+				try:
+					vbase = mesh_voff[bp][mi][mesh_i]
+				except IndexError:
+					vbase = 0
 				for sg in range(num_strip_groups):
 					sgh = meshh + strip_group_off + sg * 25
 					(
