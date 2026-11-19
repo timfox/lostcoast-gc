@@ -40,7 +40,7 @@ GC_PR_MAX_TRIS = 65535
 # shared PVS rows freed ~5 MB, so the monastery's big props get close models.
 # 200000 (4 MB of the 16) with 5.5 MB of ARAM free after every reserve: room
 # for the props the player sees close but cannot walk up to (the chandelier).
-GC_PR_MODEL_TRIS = int(os.environ.get("LC_PROP_MODEL_TRIS", "200000"))
+GC_PR_MODEL_TRIS = int(os.environ.get("LC_PROP_MODEL_TRIS", "232000"))
 GC_PR_CMD_VERTS = 1200   # vertices in one draw command (even)
 GC_PR_PIECE_BYTES = 15360  # piece body cap; header + body fit the 16 KB bounce
 
@@ -1176,9 +1176,9 @@ def bake_props(
 	# where the player can walk), nearest first, while the budget lasts.
 	# Memory compromises: the pack's triangle budget, and CLOSE_MAX_TRIS a
 	# model (a larger chain does not fit the engine's near cache well).
-	CLOSE_MAX_TRIS = int(os.environ.get("LC_CLOSE_MAX_TRIS", "12000"))
+	CLOSE_MAX_TRIS = int(os.environ.get("LC_CLOSE_MAX_TRIS", "12500"))
 	NEAR_REACH = 600.0  # units from the nearest walkable node
-	MAX_RANGE = 600.0   # a model over 2000 triangles is not drawn whole further than this
+	MAX_RANGE = 900.0   # a model over 2000 triangles is not drawn whole further than this
 	LOD_UNITS_PER_METRIC = 320.0 / math.tan(math.radians(75.0 / 2.0)) / 100.0
 	close_models: dict[str, tuple[SourceMesh, float]] = {}
 	nodes = []
@@ -1237,6 +1237,17 @@ def bake_props(
 				switch = lod_switch_point(vtx, 1)
 			except Exception:  # noqa: BLE001
 				continue
+			if len(full.tris) > CLOSE_MAX_TRIS:
+				# Too large for the near cache: Source's next level instead,
+				# out to where Source itself would leave it.
+				try:
+					lod1 = load_source_mesh(mdl, vvd, vtx, lod=1)
+					sw2 = lod_switch_point(vtx, 2)
+				except Exception:  # noqa: BLE001
+					lod1 = None
+				if lod1 is not None and len(mesh.tris) < len(lod1.tris) <= CLOSE_MAX_TRIS and sw2 is not None:
+					print(f"  close model for {model} from LOD 1: {len(lod1.tris)} tris (LOD 0 is {len(full.tris)}, over the {CLOSE_MAX_TRIS} a model)")
+					full, switch = lod1, sw2
 			if len(full.tris) > CLOSE_MAX_TRIS and len(full.tris) >= 2 * len(mesh.tris):
 				print(f"  no close model for {model}: {len(full.tris)} tris is over the {CLOSE_MAX_TRIS} a model")
 			if len(full.tris) <= len(mesh.tris) or len(full.tris) > CLOSE_MAX_TRIS:
@@ -1285,9 +1296,12 @@ def bake_props(
 			# A full model that stays on out to a long range is in most frames
 			# of its area: shipwreck_part03 (4837 triangles inside 834 units)
 			# took two harbor windows from 60 to 55 fps.
+			# Its range is cut to MAX_RANGE rather than the model left out:
+			# left out, the wreck the map starts in (4837 triangles, Source's
+			# LOD 0 out to 834 units) was drawn from its 494-triangle LOD 2
+			# with the player standing inside it.
 			if big is None and dist > MAX_RANGE and len(full.tris) > 2000:
-				print(f"  no close model for {model}: {len(full.tris)} tris out to {dist:.0f} units costs the frame rate")
-				continue
+				dist = MAX_RANGE
 			if dist <= 0.0 or reach[model] > dist:
 				if len(full.tris) >= 2 * len(mesh.tris):
 					print(f"  no close model for {model}: {len(mesh.tris)} of {len(full.tris)} tris, range {dist:.0f} < "

@@ -146,7 +146,13 @@ def load_source_mesh(mdl: bytes, vvd: bytes, vtx: bytes, lod: int = 2) -> Source
 		if num_lod_verts[i] > 0:
 			max_lod = i
 	target_lod = max(0, min(lod, max_lod))
-	lod_map = _vvd_lod_map(vvd, target_lod)
+	# VTX vertex ids are mesh-local in the LOD 0 layout at every LOD: the
+	# engine draws the lower levels out of the same vertex buffer. Building
+	# the map for the target LOD dropped the LOD-0-only vertices of the first
+	# mesh, so every later mesh of a lower level indexed the wrong vertices
+	# (shipwreck_part01 LOD 1: 70 triangles of its second mesh strung across
+	# the hull as slabs).
+	lod_map = _vvd_lod_map(vvd, 0)
 	if not lod_map:
 		raise ValueError(f"empty VVD lod map for lod={target_lod}")
 	mesh_voff = _mdl_mesh_vertex_offsets(mdl)
