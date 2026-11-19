@@ -146,6 +146,12 @@ def classify(vmt: dict[str, str] | None) -> dict | None:
 # d2_lostcoast env_sun: towards the sun is yaw 137°, 10° up. Floor texture
 # axes in Source are S=+x, T=-y, so tangent space L = (Lx, -Ly, Lz).
 # Runtime emboss uses the XY as a UV offset (texture matrix).
+# How much of N.L's swing a shade tile keeps. 1 = the slope's own dot product
+# with the sun's tangent direction (a 15 degree bump is +-26 %).
+EMBOSS_SHADE_GAIN = 1.0
+# Height difference across two texels of a 64x64 tile -> slope, for the one
+# authored height map (sandfloor007c_height).
+EMBOSS_HEIGHT_SLOPE = 2.0
 _SUN_YAW = math.radians(137.0)
 _SUN_ELEV = math.radians(10.0)
 SUN_TANGENT = (
@@ -177,12 +183,18 @@ def bump_height_i8(rgba: bytes, w: int, h: int, from_normal: bool) -> bytes:
 				base = (sy * w + sx0) * 4
 				for _sx in range(sx0, sx1):
 					if from_normal:
-						# Tangent normals keep Z≈1 (flat blue). Emboss needs
-						# high-frequency height: the X/Y channels carry the
-						# rock grain, so their average stands in for height.
-						# Forward-differencing that along the sun offset still
-						# shades like a height field.
-						acc += 0.5 * (rgba[base] + rgba[base + 1])
+						# The shade of this texel under the map's sun: half
+						# of 1 + N.L over the surface, N from the normal map
+						# (R along S, G along T), L the sun in tangent space.
+						# The engine draws lit x tile x 2 (trailer byte 5 = 1).
+						# It used to store the mean of X and Y as a height and
+						# difference it four texels apart at run time: a second
+						# derivative, which rimmed every bump with light and
+						# quilted the cliffs. Retail's relief is this, and
+						# subtle.
+						nx = rgba[base] / 127.5 - 1.0
+						ny = rgba[base + 1] / 127.5 - 1.0
+						acc += 255.0 * 0.5 * (1.0 + EMBOSS_SHADE_GAIN * (nx * SUN_TANGENT[0] + ny * SUN_TANGENT[1]))
 					else:
 						acc += (
 							rgba[base] * 0.299
@@ -194,8 +206,19 @@ def bump_height_i8(rgba: bytes, w: int, h: int, from_normal: bool) -> bytes:
 			lum.append(int(max(0, min(255, round(acc / max(1, n))))))
 	# Stretch contrast so cliff grain reads at 480p after the
 	# (0.5+h0-h1)×2 emboss; keep the mean near mid-grey for a neutral floor.
-	mean = sum(lum) / len(lum)
-	stretch = 2.0
+	if not from_normal:
+		# An authored height map: its slope along the sun, as the shade a
+		# normal map would give (central differences, wrapping: it tiles).
+		hs = [v / 255.0 for v in lum]
+		lum = []
+		for y in range(side):
+			for x in range(side):
+				dx = hs[y * side + (x + 1) % side] - hs[y * side + (x - 1) % side]
+				dy = hs[((y + 1) % side) * side + x] - hs[((y - 1) % side) * side + x]
+				d = -(dx * SUN_TANGENT[0] + dy * SUN_TANGENT[1]) * EMBOSS_HEIGHT_SLOPE
+				lum.append(int(max(0, min(255, round(255.0 * 0.5 * (1.0 + EMBOSS_SHADE_GAIN * d))))))
+	mean = 128.0
+	stretch = 1.0
 	lum = [
 		int(max(0, min(255, round(128.0 + (v - mean) * stretch))))
 		for v in lum
@@ -522,8 +545,10 @@ def build_table(
 		) + b"".join(envmask_blobs)
 	if emboss_blobs:
 		# Trailer after envmasks (or details): runtime probes for GCeh.
+		# Byte 5 = 1: the tiles are shade factors (bump_height_i8 from a
+		# normal map), not heights.
 		body += GC_TEVMAT_EMBOSS_MAGIC + struct.pack(
-			">B3x", len(emboss_blobs)
+			">BB2x", len(emboss_blobs), 1
 		) + b"".join(emboss_blobs)
 	if envmask_small:
 		# Last: an engine that does not know it stops reading here.
