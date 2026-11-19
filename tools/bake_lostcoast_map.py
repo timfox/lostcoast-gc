@@ -392,9 +392,19 @@ def rgba_to_cmpr_mips(rgba: bytes, w: int, h: int, alpha: bool, max_side: int = 
 	fcol = rgb.astype(np.float32)
 	fcov = opaque.astype(np.float32)
 	while True:
+		ch, cw = fcov.shape
+		# CMPR stops at 8x8, and that is where the chain ends. The buildings
+		# of the 3D skybox are drawn at a sixteenth of their size and their
+		# corrugated siding is minified far past it: an 8x8 level that still
+		# carries the pattern aliased into stripes across the whole wall.
+		# The last level of a chain of three or more is the texture's mean,
+		# which is what the 1x1 level of a full chain would be.
+		if min(ch, cw) <= 8 and count >= 2:
+			wsum = float(fcov.sum())
+			mean = (fcol * fcov[..., None]).sum((0, 1)) / wsum if wsum > 0 else fcol.mean((0, 1))
+			fcol = np.broadcast_to(mean, fcol.shape).astype(np.float32)
 		levels += gx_cmpr_encode_blocks(np.clip(fcol + 0.5, 0, 255).astype(np.uint8), fcov >= 0.5)
 		count += 1
-		ch, cw = fcov.shape
 		if min(ch, cw) <= 8:
 			break
 		cover = fcov.reshape(ch // 2, 2, cw // 2, 2).sum((1, 3))
