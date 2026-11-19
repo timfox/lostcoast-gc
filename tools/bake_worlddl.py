@@ -83,6 +83,12 @@ LM_PAGES_LEFT = 512
 # LC_WD_NRM=1 keeps it.
 WD_FLAG_NO_NRM = 0x0002
 WD_NO_NRM = os.environ.get("LC_WD_NRM", "0") != "1"
+# Header flag 0x0004: a vertex carries a one-byte index into its chunk's RGBA
+# table instead of four colour bytes, 12 -> 9 bytes (needs xash3d-gc with
+# GC_WD_FLAG_CLR_INDEX). A lit chunk reads only the alpha of that colour.
+# Chunks that are lit by their vertex colours (the 3D skybox) keep them.
+WD_FLAG_CLR_INDEX = 0x0004
+WD_CLR_INDEX = os.environ.get("LC_WD_CLR_INDEX", "1") != "0" and WD_NO_NRM
 
 
 def lump(data: bytes, i: int) -> bytes:
@@ -797,8 +803,47 @@ class Chunk:
 		for key in self.pos:  # insertion order == index order
 			out += struct.pack(">hhh", *key)
 		pad32(out)
+		# Colour table: the chunk's RGBA values, the RGB cut to fewer bits
+		# (and then the alpha) until 256 entries hold them. A lit chunk
+		# never reads the RGB, so those go first.
+		clr_ofs = 0
+		table: dict = {}
+		quant = None
+		if WD_CLR_INDEX and not getattr(self, "direct_clr", False):
+			seen = set()
+			for m in mats:
+				dl = self.batches[m]
+				at = 0
+				while at + 3 <= len(dl):
+					n = struct.unpack_from(">H", dl, at + 1)[0]
+					at += 3
+					for _k in range(n):
+						seen.add(bytes(dl[at + 2:at + 6]))
+						at += 12
+			for qc, qa in ((0, 0), (1, 0), (2, 0), (3, 0), (3, 1), (4, 1), (4, 2), (5, 2), (5, 3), (6, 3), (7, 4), (8, 5), (8, 8)):
+				mc, ma = (0xFF << qc) & 0xFF, (0xFF << qa) & 0xFF
+				cut = {bytes((c[0] & mc, c[1] & mc, c[2] & mc, c[3] & ma)) for c in seen}
+				if len(cut) <= 256:
+					quant = (mc, ma)
+					table = {c: i for i, c in enumerate(sorted(cut))}
+					break
+			clr_ofs = len(out)
+			for c in sorted(table):
+				out += c
+			pad32(out)
 		for i, m in enumerate(mats):
 			dl = bytearray(self.batches[m])
+			if quant:
+				mc, ma = quant
+				src, dl, at = dl, bytearray(), 0
+				while at + 3 <= len(src):
+					n = struct.unpack_from(">H", src, at + 1)[0]
+					dl += src[at:at + 3]
+					at += 3
+					for _k in range(n):
+						c = src[at + 2:at + 6]
+						dl += src[at:at + 2] + bytes((table[bytes((c[0] & mc, c[1] & mc, c[2] & mc, c[3] & ma))],)) + src[at + 6:at + 12]
+						at += 12
 			pad32(dl)  # GX NOPs
 			struct.pack_into(">HHII", out, 16 + 12 * i, m & 0xFFFF, m >> 16, len(out), len(dl))
 			out += dl
@@ -810,7 +855,7 @@ class Chunk:
 		# when the chunk is drawn. The header field is page index + 1.
 		if getattr(self, "lm_keep", False):
 			lm_ofs = self.lm_index + 1
-		struct.pack_into(">HHII", out, 0, len(self.pos), len(mats), pos_ofs, lm_ofs)
+		struct.pack_into(">HHIII", out, 0, len(self.pos), len(mats), pos_ofs, lm_ofs, clr_ofs)
 		return bytes(out)
 
 
@@ -1603,7 +1648,10 @@ def bake(map_bsp: Path, out_dir: Path, max_disp_power: int) -> None:
 		lm_pages += page
 	LM_PAGES_LEFT = 512 - len(shared_index)
 	print(f"  lightmap pages: {len(shared_index)} shared by {n_lit} of {n_chunks_lm} lightmapped chunks")
+	for c in order:
+		chunks[c].direct_clr = (c & 0xFFFF) in sky_clusters or not getattr(chunks[c], "lm_keep", False)
 	chunk_blobs = [chunks[c].encode() for c in order]
+	print(f"  colour-indexed chunks: {sum(1 for c in order if not chunks[c].direct_clr) if WD_CLR_INDEX else 0} of {len(order)}")
 	# The (cubemap, plane axis) pairs the reflective batches look up, for
 	# tools/bake_lostcoast_cubemaps.py (media/cm_<map>.gcm holds only these).
 	from bake_lostcoast_cubemaps import nearest_axis
@@ -1670,7 +1718,7 @@ def bake(map_bsp: Path, out_dir: Path, max_disp_power: int) -> None:
 	body += lm_pages
 	max_chunk = max((len(b) for b in chunk_blobs), default=0)
 	struct.pack_into(
-		">4sHH13I", body, 0, b"GCwd", 2, WD_FLAG_NO_NRM if WD_NO_NRM else 0,
+		">4sHH13I", body, 0, b"GCwd", 2, (WD_FLAG_NO_NRM if WD_NO_NRM else 0) | (WD_FLAG_CLR_INDEX if WD_CLR_INDEX else 0),
 		bsp.numclusters, len(order), len(mat_recs), len(bsp.nodes),
 		len(plane_remap), ofs_mats, ofs_nodes, ofs_planes,
 		ofs_chunkdir, ofs_pvsdir, ofs_pvs, ofs_chunks,
