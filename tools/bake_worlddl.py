@@ -1520,8 +1520,29 @@ def bake(map_bsp: Path, out_dir: Path, max_disp_power: int) -> None:
 					hi = depth_at(tx + x, ty + y)
 					lo = depth_at(tx + x + 1, ty + y)
 					dp[tile * 32 + y * 4 + x // 2] = (hi << 4) | lo
+	# A second map on the same grid (header word 5 = 1): whether the sun
+	# reaches the water there, traced through the map toward env_sun. The
+	# engine multiplies the sun's glint on the water by it: the glint used
+	# to lie on water in the cliff's shadow, where the cliff stands between
+	# the water and the sun.
+	from source_lightcache import LightCache
+	_lc = LightCache(map_bsp)
+	sunmap = bytearray(DP_W * DP_H // 2)
+	n_shadow = 0
+	def sun_at(gx, gy):
+		return 15 if _lc.sun_visible((DP_X0 + (gx + 0.5) * DP_CELL, DP_Y0 + (gy + 0.5) * DP_CELL, WATER_Z + 2.0)) else 0
+	for ty in range(0, DP_H, 8):
+		for tx in range(0, DP_W, 8):
+			tile = (ty // 8) * (DP_W // 8) + (tx // 8)
+			for y in range(8):
+				for x in range(0, 8, 2):
+					hi = sun_at(tx + x, ty + y)
+					lo = sun_at(tx + x + 1, ty + y)
+					n_shadow += (hi == 0) + (lo == 0)
+					sunmap[tile * 32 + y * 4 + x // 2] = (hi << 4) | lo
+	print(f"  water sun map: {n_shadow} of {DP_W * DP_H} cells in shadow")
 	dp_path = out_dir / "media" / f"dp_{stem}.gcx"
-	dp_path.write_bytes(struct.pack(">4sHHfff", b"GCdp", DP_W, DP_H, DP_X0, DP_Y0, DP_CELL) + b"\0" * 12 + bytes(dp))
+	dp_path.write_bytes(struct.pack(">4sHHfffI", b"GCdp", DP_W, DP_H, DP_X0, DP_Y0, DP_CELL, 1) + b"\0" * 8 + bytes(dp) + bytes(sunmap))
 	shallow = sum(1 for row in ground for z in row if z is not None and WATER_Z - DP_FULL < z <= WATER_Z)
 	print(f"  water depth map {dp_path.name}: {DP_W}x{DP_H}, shallow cells {shallow}")
 
