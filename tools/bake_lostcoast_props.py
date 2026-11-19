@@ -266,6 +266,11 @@ def _max_side(model: str, texname: str) -> int:
 	low = texname.lower()
 	if "coastrock" in low:
 		return 256
+	# The monastery building: one texture over walls 3400 units across. The
+	# engine gives it a big slot only while its close model is drawn (inside
+	# 1587 units), when the coast rocks are out of the way.
+	if low.rsplit("/", 1)[-1] == "monastery01":
+		return 256
 	return 128
 
 
