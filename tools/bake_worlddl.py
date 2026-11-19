@@ -969,11 +969,40 @@ def bake(map_bsp: Path, out_dir: Path, max_disp_power: int) -> None:
 	disp_light_records = []
 	disp_ctx: dict = {}  # displacement face -> (cluster, lightmap cell, vertex grid, side, face)
 
-	for fi in range(world_first, world_first + world_num):
+	# Brush entities that stand in the map as the player finds them: the
+	# scaffolding's boards and the cannon's bolt and doors (func_physbox),
+	# func_brush details, the boarded-up rear exit (func_breakable), the
+	# courtyard door, the crane's platform. Only model 0 was baked, so none
+	# of them was drawn at all. They go into the world at their spawn
+	# position, lit by their own lightmaps; rendermode 10 (never rendered)
+	# and brushes that start disabled stay out. Nothing moves them yet.
+	ent_faces: dict[int, tuple] = {}
+	ent_lump = lump(bsp.data, 0).decode("latin1")
+	for _blk in re.findall(r"\{([^}]*)\}", ent_lump):
+		_kv = dict(re.findall(r'"([^"]+)" "([^"]*)"', _blk))
+		_m = _kv.get("model", "")
+		if not _m.startswith("*") or _kv.get("classname") not in (
+			"func_physbox", "func_brush", "func_breakable", "func_door_rotating", "func_movelinear",
+		):
+			continue
+		if _kv.get("rendermode") == "10" or _kv.get("StartDisabled") == "1":
+			continue
+		if any(abs(float(v)) > 0.01 for v in _kv.get("angles", "0 0 0").split()):
+			continue  # none in d2_lostcoast; a turned brush needs its normals turned too
+		_mi = int(_m[1:])
+		if not 0 < _mi < len(bsp.models):
+			continue
+		_org = tuple(float(v) for v in _kv.get("origin", "0 0 0").split())
+		for _fi in range(bsp.models[_mi][10], bsp.models[_mi][10] + bsp.models[_mi][11]):
+			ent_faces[_fi] = _org
+	n_ent_faces = 0
+
+	for fi in list(range(world_first, world_first + world_num)) + sorted(ent_faces):
 		f = bsp.faces[fi]
 		ti = bsp.texinfos[f[5]]
 		if ti[4] & skip_flags:
 			continue
+		ent_org = ent_faces.get(fi)
 		mat = mat_for(ti[5], ti[4])
 		if mat is None:
 			continue
@@ -1058,11 +1087,14 @@ def bake(map_bsp: Path, out_dir: Path, max_disp_power: int) -> None:
 			n_disp += 1
 			continue
 
-		cluster = face_cluster.get(fi, -1)
+		# Texture and lightmap coordinates come from the brush's own space;
+		# the vertices go where the entity stands.
+		wpts = pts if ent_org is None else [tuple(p[k] + ent_org[k] for k in range(3)) for p in pts]
+		cluster = face_cluster.get(fi, -1) if ent_org is None else -1
 		if cluster < 0:
-			cx = sum(p[0] for p in pts) / len(pts)
-			cy = sum(p[1] for p in pts) / len(pts)
-			cz = sum(p[2] for p in pts) / len(pts)
+			cx = sum(p[0] for p in wpts) / len(wpts)
+			cy = sum(p[1] for p in wpts) / len(wpts)
+			cz = sum(p[2] for p in wpts) / len(wpts)
 			pl = bsp.planes[f[0]]
 			sign = -1.0 if f[1] else 1.0
 			cluster = bsp.cluster_at((cx + pl[0] * sign * 4, cy + pl[1] * sign * 4, cz + pl[2] * sign * 4))
@@ -1079,7 +1111,7 @@ def bake(map_bsp: Path, out_dir: Path, max_disp_power: int) -> None:
 		if cell and samples:
 			ch.lm.blit(cell, samples)
 		verts = []
-		for p, (s, t) in zip(pts, sts):
+		for wp, p, (s, t) in zip(wpts, pts, sts):
 			# WorldVertexTransition on a plain brush face has no blend alpha:
 			# Source shows $basetexture only. 255 here drew layer 2 solid
 			# and left hard-edged pale polygons across the beach.
@@ -1091,9 +1123,11 @@ def bake(map_bsp: Path, out_dir: Path, max_disp_power: int) -> None:
 			if cell:
 				sl, tl, lw, lh = luxel_uv(bsp, f, p)
 				lu, lv = cell_st(cell, sl, tl, lw, lh)
-			verts.append((p, col, nrm, s, t, lu, lv))
+			verts.append((wp, col, nrm, s, t, lu, lv))
 		ch.emit(mat, GX_DRAW_TRIFAN, verts, tex_axes=(ti[0], ti[1]))
-		if nrm[2] > 0.5 and not water:
+		if ent_org is not None:
+			n_ent_faces += 1
+		if nrm[2] > 0.5 and not water and ent_org is None:
 			for k in range(1, len(pts) - 1):
 				ground_tris.append((pts[0], pts[k], pts[k + 1]))
 		face_ctx[fi] = (cluster, cell, nrm)
@@ -1628,6 +1662,7 @@ def bake(map_bsp: Path, out_dir: Path, max_disp_power: int) -> None:
 	batches = sum(len(c.batches) for c in chunks.values())
 	resident = ofs_pvsdir  # mats + tree + chunk directory stay in MEM1
 	print(f"world DL bake {stem}:")
+	print(f"  brush entity faces: {n_ent_faces} of {len(ent_faces)}")
 	print(f"  faces={n_faces} displacements={n_disp} (power<={max_disp_power}) orphans={n_orphans} flat_blend_verts={n_flat_blend} tris={tris}")
 	print(f"  clusters={bsp.numclusters} chunks={len(order)} batches={batches} mats={len(mat_recs)}")
 	print(f"  tree nodes={len(bsp.nodes)} planes={len(plane_remap)} ({(len(node_blob) + len(plane_blob)) // 1024} KB)")
