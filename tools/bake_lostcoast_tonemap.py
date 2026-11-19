@@ -44,14 +44,15 @@ DEFAULT_MIN, DEFAULT_MAX = 0.5, 2.0  # mat_autoexposure_min / _max
 # At 1 the 8-bit texture clips only where the HDR sky is over 1 (the sun's
 # glare), and scales up to 4.6 stay inside the engine's factor of 2.
 SKY_EXPOSURE = 1.0
-# The world is baked as gamma( light x LIGHT_EXPOSURE ). Which tonemap scale
-# that picture stands for is measured, not derived: in the retail still of the
-# cove (playtests/reference/retail-hd-cove.png, the default dumpeye view) the
-# sky sits at scale 1.55 (it equals the HDR sky x 1.55), and at that scale the
-# sand, the ship's hull and the dark water match ours when the baked picture
-# counts as scale 1.4, i.e. LIGHT_EXPOSURE / 2. With LIGHT_EXPOSURE itself as
-# the scale the world came out 1.8 times too dark there.
-WORLD_LIGHT_UNITS = 2.0
+# The world is baked as gamma( light x LIGHT_EXPOSURE ), so the baked picture
+# stands for tonemap scale LIGHT_EXPOSURE. It used to be counted as half of
+# that (1.4), fitted to one retail still while the engine's exposure left the
+# sky out of its measurement and sat near the map's maximum. With the sky
+# measured (xash3d-gc exposure-sky) Source's rule puts the cove at the map's
+# minimum, 0.9, and against playtests/reference/retail-cove.jpg from the same
+# spot the sand is 97 of 255 in retail: ours is 98 with the picture counted
+# as 2.8, and was 135 counted as 1.4.
+WORLD_LIGHT_UNITS = 1.0
 
 
 def main() -> None:
