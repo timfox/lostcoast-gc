@@ -417,6 +417,9 @@ def _pack_squares(sides: list[int]):
 	return best
 
 
+LM_SCALE_HIST: dict = {}
+
+
 def plan_lightmap_pages() -> dict:
 	plan = {}
 	groups = {}
@@ -425,6 +428,7 @@ def plan_lightmap_pages() -> dict:
 		for scale in (1.0, 0.875, 0.75, 0.625, 0.5, 0.4375, 0.375, 0.3125, 0.25, 0.1875, 0.125):
 			got = _pack_squares([max(2, int(round(sd * scale))) for sd in sides])
 			if got:
+				LM_SCALE_HIST[scale] = LM_SCALE_HIST.get(scale, 0) + 1
 				break
 		if got is None:
 			# Even the smallest cells overflow one page: hand out what fits.
@@ -965,6 +969,8 @@ def bake(map_bsp: Path, out_dir: Path, max_disp_power: int) -> None:
 	world_first, world_num = bsp.models[0][10], bsp.models[0][11]
 	n_faces = n_disp = n_orphans = n_flat_blend = 0
 	face_ctx: dict[int, tuple] = {}  # brush face → (cluster, lightmap cell, normal)
+	lm_part: dict[int, tuple] = {}  # cluster → (current part, lightmap texels asked of it)
+	LM_PART_AREA = 820  # of a page's 1024: squares of mixed sizes do not pack tighter
 	ground_tris: list = []  # upward-facing world triangles, for the water depth map
 	disp_light_records = []
 	disp_ctx: dict = {}  # displacement face -> (cluster, lightmap cell, vertex grid, side, face)
@@ -1105,8 +1111,20 @@ def bake(map_bsp: Path, out_dir: Path, max_disp_power: int) -> None:
 		pln = bsp.planes[f[0]]
 		sign = -1.0 if f[1] else 1.0
 		nrm = (pln[0] * sign, pln[1] * sign, pln[2] * sign)
-		ch = chunks.setdefault(cluster, Chunk())
 		samples = None if water else face_samples(bsp, f)
+		# One 32x32 lightmap page a chunk. A cluster with more lightmapped
+		# faces than a page holds (the church's nave: 478 faces had no cell
+		# at all and were lit from their corners, the rest shared the page
+		# at an eighth of their size) is cut into several chunks, each with
+		# a page of its own. Chunk key = cluster + part * 65536.
+		if samples:
+			_side = max(2, min(16, f[13] + 1, f[14] + 1))
+			_part, _area = lm_part.get(cluster, (0, 0))
+			if _area and _area + _side * _side > LM_PART_AREA:
+				_part, _area = _part + 1, 0
+			lm_part[cluster] = (_part, _area + _side * _side)
+			cluster += _part << 16
+		ch = chunks.setdefault(cluster, Chunk())
 		cell = ch.lm.alloc(f[13] + 1, f[14] + 1) if samples else None
 		if cell and samples:
 			ch.lm.blit(cell, samples)
@@ -1541,10 +1559,14 @@ def bake(map_bsp: Path, out_dir: Path, max_disp_power: int) -> None:
 	# chunk needed its own page (the 512 widest, span >= 256), so the picture
 	# is unchanged and only the bytes shrink. LC_LM_ALL=1 lights every chunk
 	# (the rest otherwise draw with vertex light); it still fits in ~220 pages.
-	lm_all = os.environ.get("LC_LM_ALL", "0") == "1"
+	# Every chunk is lit by default (LC_LM_ALL=0 for the old 512 largest):
+	# the pages are shared, 256 of the 512 hold all 1365 chunks, and the
+	# chunks left to vertex light were whole walls of the church gone flat
+	# and dark.
+	lm_all = os.environ.get("LC_LM_ALL", "1") == "1"
 	ranked = []
 	for cl, ch in chunks.items():
-		if not ch.pos or not ch.lm.used or ch.lm.failed or cl in sky_clusters:
+		if not ch.pos or not ch.lm.used or ch.lm.failed or (cl & 0xFFFF) in sky_clusters:
 			continue
 		span = max(ch.maxs[a] - ch.mins[a] for a in range(3))
 		if lm_all or span >= 256:
@@ -1631,7 +1653,7 @@ def bake(map_bsp: Path, out_dir: Path, max_disp_power: int) -> None:
 	run = 0
 	for cl, blob in zip(order, chunk_blobs):
 		ch = chunks[cl]
-		body += struct.pack(">II3h3hHH", run, len(blob), *ch.mins, *ch.maxs, cl, 0)
+		body += struct.pack(">II3h3hHH", run, len(blob), *ch.mins, *ch.maxs, cl & 0xFFFF, 0)
 		run += len(blob)
 	pad32(body)
 	ofs_pvsdir = len(body)
@@ -1692,6 +1714,7 @@ def main() -> int:
 	ENV_SPLIT.clear()
 	DISP_CELLS.clear()
 	_unfit = sum(1 for r in LM_PLAN.values() for c in r if c is None)
+	print("  lightmap cell scale -> pages:", sorted(LM_SCALE_HIST.items(), reverse=True), "unfit pages", len(LM_PLAN) - sum(LM_SCALE_HIST.values()))
 	print(f"  lightmap plan: {len(LM_PLAN)} pages, {sum(len(r) for r in LM_PLAN.values())} cells, {_unfit} without room")
 	bake(args.map, args.out, args.max_disp_power)
 	return 0
