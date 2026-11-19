@@ -1544,8 +1544,15 @@ def bake_props(
 		_b = lambda v: int(max(0, min(255, round(v))))
 		_lt_base = [_b(_g(_side[k])) for k in range(3)]
 		_lt_up = [_b(_g(_cube[4][k]) - _g(_side[k])) for k in range(3)]
+		# Record 3 (xash3d-gc prop-underside): the engine draws the sky term
+		# signed, base + up x N.z, so the term is half of top minus bottom:
+		# a face that looks down goes as far under the sides as the top goes
+		# over them, toward the cube's bottom face.
+		_top = [_g(_cube[4][k]) for k in range(3)]
+		_bot = [_g(_cube[5][k]) for k in range(3)]
+		_lt_up = [_b(0.5 * (_top[k] - _bot[k])) for k in range(3)]
 		_lt_sun = [_b(_g(_avg[k] + _sun[k]) - _g(_avg[k])) if _sun else 0 for k in range(3)]
-		light_blob += bytes(_lt_base + _lt_up + _lt_sun + [2, 0, 0])
+		light_blob += bytes(_lt_base + _lt_up + _lt_sun + [3, 0, 0])
 		sun_dir = _sdir
 		# Low byte 1 marks the colour as set (the engine's own sample otherwise).
 		inst_lit = (_tex[0] << 24) | (_tex[1] << 16) | (_tex[2] << 8) | 1
