@@ -77,6 +77,12 @@ MAT_F_BASEALPHA = 0x08  # $basealphaenvmapmask — never sand IndTex
 MAT_F_ENVNOMASK = 0x10  # $envmap authored without a mask: reflects everywhere
 ENV_SPLIT: set[int] = set()  # material indices whose batches carry a normal
 LM_PAGES_LEFT = 512
+# The GPU never reads the world's vertex normal (no normal texgen, lighting
+# channels off: reflective batches carry their normal in the batch record).
+# Header flag 0x0002 drops it from every display-list vertex, 15 -> 12 bytes.
+# LC_WD_NRM=1 keeps it.
+WD_FLAG_NO_NRM = 0x0002
+WD_NO_NRM = os.environ.get("LC_WD_NRM", "0") != "1"
 
 
 def lump(data: bytes, i: int) -> bytes:
@@ -764,12 +770,12 @@ class Chunk:
 			if color_refs is not None:
 				key = tuple(round(v) for v in p)
 				if key in color_refs:
-					color_refs[key].append((dl, len(dl) + 5))
-			# 15 bytes per vertex: the chunk cache is the scarce resource, so
-			# normals are s8 (6 fraction bits) and lightmap UV u8, not s16.
-			dl += struct.pack(
-				">Hbbb4BhhBB",
-				self.pos_index(p), nx >> 8, ny >> 8, nz >> 8,
+					color_refs[key].append((dl, len(dl) + (2 if WD_NO_NRM else 5)))
+			# 12 bytes per vertex (15 with the normal): the chunk cache is the
+			# scarce resource, so lightmap UV is u8, not s16.
+			nrm_b = b"" if WD_NO_NRM else struct.pack(">bbb", nx >> 8, ny >> 8, nz >> 8)
+			dl += struct.pack(">H", self.pos_index(p)) + nrm_b + struct.pack(
+				">4BhhBB",
 				max(0, min(255, c[0])), max(0, min(255, c[1])),
 				max(0, min(255, c[2])), max(0, min(255, c[3])),
 				int(max(-32768, min(32767, round(s * (1 << ST_FRAC))))),
@@ -1608,7 +1614,7 @@ def bake(map_bsp: Path, out_dir: Path, max_disp_power: int) -> None:
 	body += lm_pages
 	max_chunk = max((len(b) for b in chunk_blobs), default=0)
 	struct.pack_into(
-		">4sHH13I", body, 0, b"GCwd", 2, 0,
+		">4sHH13I", body, 0, b"GCwd", 2, WD_FLAG_NO_NRM if WD_NO_NRM else 0,
 		bsp.numclusters, len(order), len(mat_recs), len(bsp.nodes),
 		len(plane_remap), ofs_mats, ofs_nodes, ofs_planes,
 		ofs_chunkdir, ofs_pvsdir, ofs_pvs, ofs_chunks,
