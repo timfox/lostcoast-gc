@@ -196,6 +196,26 @@ _SEQ_SECONDS: dict = {}  # the actor's sequences: name -> seconds
 _SEQ_HINGES: dict = {}
 
 
+def _held_lines(play: str, t: float, actor: str) -> list[str]:
+	"""A prop parented to him that the map's scripted_sequence of this
+	animation turns on and kills (the keys, in his hand while he unlocks the
+	gate): bit 1 of his body for that long."""
+	out = []
+	dur = _SEQ_SECONDS.get(play.lower(), 0.0)
+	for name, pairs in _MAP_PAIRS.items():
+		ssq = _MAP_ENTS[name]
+		if ssq.get("classname") != "scripted_sequence" or ssq.get("m_iszPlay", "").lower() != play.lower():
+			continue
+		for k2, v2 in pairs:
+			p2 = [x.strip() for x in v2.split(",")]
+			held = _MAP_ENTS.get(p2[0].lower(), {})
+			if (k2.lower() == "onbeginsequence" and len(p2) > 3 and p2[1].lower() == "turnon"
+					and held.get("parentname", "").lower() == actor and held.get("classname") == "prop_dynamic"):
+				on = t + float(p2[3] or 0)
+				out += [f"body {on:.2f} {on:.2f} 2", f"body {t + dur:.2f} {t + dur:.2f} -2"]
+	return out
+
+
 def _hinge_lines(play: str, t: float) -> list[str]:
 	# (hinge, degrees a second, stop angle, then the shut leaf's box: the
 	# game stands a solid there until the leaf swings)
@@ -257,6 +277,7 @@ def bake_scene(img: SceneImage, vcd: str, actor: str, scripts: dict, waves: set[
 				elif e.type == "sequence" and e.param1:
 					lines.append(f"sequence {e.start:.2f} {e.end:.2f} seq_{e.param1}")
 					lines += _hinge_lines(e.param1, e.start)
+					lines += _held_lines(e.param1, e.start, actor)
 					seqs_named.add(e.param1.lower())
 				elif e.type == "firetrigger":
 					lines.append(f"trigger {e.start:.2f} {e.param1}")
@@ -274,7 +295,7 @@ def bake_scene(img: SceneImage, vcd: str, actor: str, scripts: dict, waves: set[
 		for tgt in (scene_outputs or {}).get(f"ontrigger{n}:trigger", []):
 			rl = _MAP_PAIRS.get(tgt.lower(), [])
 			if any(k.lower() == "ontrigger" and v.lower().startswith(f"{actor}_weapon,kill") for k, v in rl):
-				lines.append(f"body {t:.2f} {t:.2f} 1")
+				lines.append(f"body {t:.2f} {t:.2f} 1")  # (sets bit 0: his weapon is gone)
 		for tgt in (scene_outputs or {}).get(f"ontrigger{n}", []):
 			ssq = _MAP_ENTS.get(tgt.lower())
 			if not ssq or ssq.get("classname") != "scripted_sequence":
@@ -285,6 +306,7 @@ def bake_scene(img: SceneImage, vcd: str, actor: str, scripts: dict, waves: set[
 			name = f"seq_{play}" + (f">seq_{post}:{_SEQ_SECONDS[post.lower()]:.2f}" if post and post.lower() in _SEQ_SECONDS else "")
 			lines.append(f"sequence {t:.2f} {t + _SEQ_SECONDS[play.lower()]:.2f} {name}")
 			lines += _hinge_lines(play, t)
+			lines += _held_lines(play, t, actor)
 	if face_events and _FACE:
 		got = face_track(face_events, _FACE)
 		if got:

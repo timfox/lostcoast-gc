@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import dataclasses
 import struct
 import sys
 from pathlib import Path
@@ -96,7 +97,16 @@ MODELS = {
 # NPC weapons (additionalequipment) whose world model's root bone is one of
 # the character's own bones: Source bone-merges them, so they bake straight
 # into the character's actor mesh on that bone (one draw, no extra entity).
-EQUIPMENT = {"fisherman": "models/lostcoast/fisherman/harpoon"}
+EQUIPMENT = {"fisherman": [("models/lostcoast/fisherman/harpoon", None, 0x08)]}
+# Props the map parents to one of the character's attachments and turns on
+# for a while (prop_dynamic keys on anim_attachment_RH, shown while he
+# unlocks the gate): baked the same way on the attachment's bone, drawn only
+# while the game says so (BATCH_HELD).
+# (The fisherman's keys are not listed yet: baked this way they showed by
+# his thigh rather than in his hand in the emulator, so they wait until the
+# attachment bone's motion in OpenGate is carried too.
+#   "fisherman": [("models/lostcoast/fisherman/keys", "anim_attachment_RH", 0x10)])
+HELD: dict = {}
 
 # Characters that look at things through Source's head/spine/body pose params.
 LOOK_MODELS = {"fisherman"}
@@ -395,6 +405,7 @@ BATCH_HALFLAMBERT = 0x01
 BATCH_MASKED = 0x02
 BATCH_ADDITIVE = 0x04
 BATCH_EQUIPMENT = 0x08  # a weapon merged onto the character: not drawn once body bit 0 is set
+BATCH_HELD = 0x10       # a prop in his hand for a while: drawn only while body bit 1 is set
 
 
 def vtx_switch_points(vtx: bytes) -> list[float]:
@@ -1040,37 +1051,60 @@ def convert(vpks, name: str, lod: int, tex_max: int, out_dir: Path, flip: bool, 
 
 	actor = name in ACTOR_LODS
 	extras = []
-	equip_mats = set()  # materials of what he carries: the game can take it out of his hand
-	if actor and name in EQUIPMENT:
-		eq = EQUIPMENT[name]
-		emdl, evvd, evtx = (read_first(vpks, eq + x) for x in (".mdl", ".vvd", ".dx90.vtx"))
-		esrc = ss.read_studio(emdl, decode_anims=False)
-		names = {b.name.lower(): i for i, b in enumerate(bones)}
-		bmap = [names.get(b.name.lower(), -1) for b in esrc.bones]
-		if emdl and evvd and evtx and bmap and bmap[0] >= 0:
-			etris, epos, enrm, euv, evb, _, _ids = lod_geometry(emdl, evvd, evtx, 0, esrc.bones)
-			# its skin becomes one more material column of the skin table
-			numtex, texidx = struct.unpack_from("<ii", emdl, 204)
-			ncd_e, cdidx_e = struct.unpack_from("<ii", emdl, 212)
-			ecds = [_cstr(emdl, struct.unpack_from("<i", emdl, cdidx_e + i * 4)[0]).replace("\\", "/") for i in range(ncd_e)]
-			o = texidx
-			etname = _cstr(emdl, o + struct.unpack_from("<i", emdl, o)[0])
-			img, kv, rel = load_skin(vpks, ecds, etname, max_side=max(tex_max, 256))
-			if img is not None:
-				nw, nh = pow2_fit(img.width, img.height, tex_max)
-				rgba = resize_rgba(img.rgba, img.width, img.height, nw, nh)
-				idx, pal = palettise(rgba, nw, nh, False)
-				new_tex = len(textures)
-				textures.append((etname[-63:], 0, nw, nh, idx, pal))
-				tex_halflambert.append(kv.get("$halflambert") == "1")
-				mat = nskinref
-				equip_mats.add(mat)
-				if skin_table:
-					skin_table = [v for f in range(nfam) for v in skin_table[f * nskinref:(f + 1) * nskinref] + [new_tex]]
-				nskinref += 1
-				extras.append(([(mat, a, b, c) for _m, a, b, c in etris], epos, enrm, euv,
-					[bmap[v] if bmap[v] >= 0 else bmap[0] for v in evb]))
-				print(f"  {name}: {eq} merged on {bones[bmap[0]].name} ({len(etris)} tris, skin {etname})")
+	equip_mats = {}  # materials of what he carries -> batch flag: the game can take it out of his hand
+	for eq, attach, flag in (EQUIPMENT.get(name, []) + HELD.get(name, [])) if actor else []:
+			emdl, evvd, evtx = (read_first(vpks, eq + x) for x in (".mdl", ".vvd", ".dx90.vtx"))
+			esrc = ss.read_studio(emdl, decode_anims=False)
+			names = {b.name.lower(): i for i, b in enumerate(bones)}
+			bmap = [names.get(b.name.lower(), -1) for b in esrc.bones]
+			if attach and emdl and evvd and evtx:
+				# On an attachment: the prop's own space is the attachment's,
+				# which the character's model places on one of his bones.
+				na, ai = struct.unpack_from("<ii", mdl, 240)
+				hit = None
+				for k in range(na):
+					o = ai + k * 92
+					if _cstr(mdl, o + struct.unpack_from("<i", mdl, o)[0]).lower() == attach.lower():
+						m12 = struct.unpack_from("<12f", mdl, o + 12)
+						hit = (struct.unpack_from("<i", mdl, o + 8)[0], [list(m12[0:4]), list(m12[4:8]), list(m12[8:12])])
+				if hit is None:
+					continue
+				ident = [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]]
+				flat = [dataclasses.replace(b, pose_to_bone=ident) for b in esrc.bones]
+				etris, epos, enrm, euv, evb, _, _ids = lod_geometry(emdl, evvd, evtx, 0, flat)
+				epos = [ss.mat34_xform(hit[1], p) for p in epos]
+				enrm = [ss.mat34_rotate(hit[1], n) for n in enrm]
+				bmap = [hit[0]] * len(esrc.bones)
+			elif emdl and evvd and evtx and bmap and bmap[0] >= 0:
+				etris, epos, enrm, euv, evb, _, _ids = lod_geometry(emdl, evvd, evtx, 0, esrc.bones)
+			else:
+				continue
+			if True:
+				# its skin becomes one more material column of the skin table
+				numtex, texidx = struct.unpack_from("<ii", emdl, 204)
+				ncd_e, cdidx_e = struct.unpack_from("<ii", emdl, 212)
+				ecds = [_cstr(emdl, struct.unpack_from("<i", emdl, cdidx_e + i * 4)[0]).replace("\\", "/") for i in range(ncd_e)]
+				o = texidx
+				etname = _cstr(emdl, o + struct.unpack_from("<i", emdl, o)[0])
+				img, kv, rel = load_skin(vpks, ecds, etname, max_side=max(tex_max, 256))
+				if img is not None:
+					# A key ring is five units long: 32 texels a side is already
+					# finer than his coat, and the skins file has to load in one
+					# piece from a heap that had 16 KB less with the full sheet.
+					nw, nh = pow2_fit(img.width, img.height, 32 if attach else tex_max)
+					rgba = resize_rgba(img.rgba, img.width, img.height, nw, nh)
+					idx, pal = palettise(rgba, nw, nh, False)
+					new_tex = len(textures)
+					textures.append((etname[-63:], 0, nw, nh, idx, pal))
+					tex_halflambert.append(kv.get("$halflambert") == "1")
+					mat = nskinref
+					equip_mats[mat] = flag
+					if skin_table:
+						skin_table = [v for f in range(nfam) for v in skin_table[f * nskinref:(f + 1) * nskinref] + [new_tex]]
+					nskinref += 1
+					extras.append(([(mat, a, b, c) for _m, a, b, c in etris], epos, enrm, euv,
+						[bmap[v] if bmap[v] >= 0 else bmap[0] for v in evb]))
+					print(f"  {name}: {eq} merged on {bones[bmap[0]].name} ({len(etris)} tris, skin {etname})")
 	if actor:
 		mat_flags = {}
 		for m in range(max(1, nskinref)):
@@ -1082,7 +1116,7 @@ def convert(vpks, name: str, lod: int, tex_max: int, out_dir: Path, flip: bool, 
 				f |= BATCH_MASKED
 			if textures[tex][1] & 0x0020:
 				f |= BATCH_ADDITIVE
-			mat_flags[m] = f | (BATCH_EQUIPMENT if m in equip_mats else 0)
+			mat_flags[m] = f | equip_mats.get(m, 0)
 		out_dir.joinpath("models", "lc").mkdir(parents=True, exist_ok=True)
 		face = None
 		if struct.unpack_from("<i", mdl, 260)[0] > 0:
