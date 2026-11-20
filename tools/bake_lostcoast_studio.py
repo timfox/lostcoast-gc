@@ -1438,6 +1438,24 @@ def _fisherman_keys(src_bsp: Path, ents: list[dict], by_name: dict, name: str, a
 				gate_best = dist
 				keys["lc_gate_trigger"] = " ".join(f"{x:g}" for x in bb)
 				keys["lc_gate_scene"] = "scripts/lc/" + Path(sc["SceneFile"].replace("\\", "/")).stem.lower() + ".txt"
+				# What that scene enables when it is over: a trigger that
+				# turns on an env_speaker while the player stands in it
+				# (his nag to go through the gate). Box, concept, and
+				# "seconds after the scene, shortest and longest gap, the
+				# trigger's own wait".
+				for k2, v2 in _outputs(sc):
+					p2 = [x.strip() for x in v2.split(",")]
+					if k2 != "oncompletion" or len(p2) < 4 or p2[1].lower() != "enable":
+						continue
+					for tg in by_name.get(p2[0].lower(), []):
+						nb = _brush_bounds(src_bsp, tg)
+						for _k3, v3 in _outputs(tg):
+							p3 = [x.strip() for x in v3.split(",")]
+							sp = (by_name.get(p3[0].lower()) or [None])[0] if len(p3) > 1 and p3[1].lower() == "turnon" else None
+							if nb and sp and sp.get("classname") == "env_speaker" and sp.get("concept"):
+								keys["lc_nag_trigger"] = " ".join(f"{x:g}" for x in nb)
+								keys["lc_nag_concept"] = sp["concept"]
+								keys["lc_nag_delay"] = f"{float(p2[3] or 0):g} {sp.get('delaymin', '15')} {sp.get('delaymax', '135')} {tg.get('wait', '1')}"
 	keys["lc_nodes"] = f"scripts/lc/{src_bsp.stem.lower()}.lcng"
 	keys["lc_talker"] = "scripts/lc/fisherman_talker.txt"
 	return keys

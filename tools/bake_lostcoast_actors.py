@@ -458,6 +458,33 @@ def main() -> int:
 					files.append(f)
 			if concept and files:
 				lines.append(f"{concept} " + " ".join(files))
+		# The map's env_speakers: each speaks one concept from a rule script
+		# of its own (the nag at the gate, scripts/talker/nags_fisherman.txt).
+		for e in _MAP_ENTS.values():
+			if e.get("classname") != "env_speaker" or not e.get("rulescript") or not e.get("concept"):
+				continue
+			rs = read_first(vpks, e["rulescript"].lower())
+			if not rs:
+				continue
+			t2 = re.sub(r"//[^\n]*", "", rs.decode("latin-1"))
+			resp2 = {n.strip('"').lower(): re.findall(r'scene\s+"([^"]+)"', body)
+				for n, body in re.findall(r'response\s+("?[\w]+"?)\s*\{([^{}]*)\}', t2)}
+			crits = {c.lower() for c, v in re.findall(r'criterion\s+"(\w+)"\s+"concept"\s+"(\w+)"', t2, re.I)
+				if v.lower() == e["concept"].lower()}
+			files = []
+			for body in re.findall(r'rule\s+"?\w+"?\s*\{([^{}]*)\}', t2):
+				crit = re.search(r"criteria\s+([^\n]+)", body)
+				resp = re.search(r"response\s+\"?(\w+)", body)
+				if not crit or not resp or not crits & {c.lower() for c in crit.group(1).split()}:
+					continue
+				for vcd in resp2.get(resp.group(1).lower(), []):
+					sc = bake_scene(img, vcd, "fisherman", scripts, waves)
+					if sc:
+						f = "scripts/lc/" + Path(vcd).stem.lower() + ".txt"
+						(out / f).write_text(sc)
+						files.append(f)
+			if files and not any(l.split(" ")[0] == e["concept"] for l in lines):
+				lines.append(f"{e['concept']} " + " ".join(files))
 		(out / "scripts" / "lc" / "fisherman_talker.txt").write_text("\n".join(lines) + "\n")
 		print(f"  talker: {len(lines) - 1} concepts")
 
