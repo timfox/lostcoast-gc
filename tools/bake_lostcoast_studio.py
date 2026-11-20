@@ -394,6 +394,7 @@ MAX_PALETTE = 10         # Flipper position/normal matrix slots (PNMTX0..9)
 BATCH_HALFLAMBERT = 0x01
 BATCH_MASKED = 0x02
 BATCH_ADDITIVE = 0x04
+BATCH_EQUIPMENT = 0x08  # a weapon merged onto the character: not drawn once body bit 0 is set
 
 
 def vtx_switch_points(vtx: bytes) -> list[float]:
@@ -1039,6 +1040,7 @@ def convert(vpks, name: str, lod: int, tex_max: int, out_dir: Path, flip: bool, 
 
 	actor = name in ACTOR_LODS
 	extras = []
+	equip_mats = set()  # materials of what he carries: the game can take it out of his hand
 	if actor and name in EQUIPMENT:
 		eq = EQUIPMENT[name]
 		emdl, evvd, evtx = (read_first(vpks, eq + x) for x in (".mdl", ".vvd", ".dx90.vtx"))
@@ -1062,6 +1064,7 @@ def convert(vpks, name: str, lod: int, tex_max: int, out_dir: Path, flip: bool, 
 				textures.append((etname[-63:], 0, nw, nh, idx, pal))
 				tex_halflambert.append(kv.get("$halflambert") == "1")
 				mat = nskinref
+				equip_mats.add(mat)
 				if skin_table:
 					skin_table = [v for f in range(nfam) for v in skin_table[f * nskinref:(f + 1) * nskinref] + [new_tex]]
 				nskinref += 1
@@ -1079,7 +1082,7 @@ def convert(vpks, name: str, lod: int, tex_max: int, out_dir: Path, flip: bool, 
 				f |= BATCH_MASKED
 			if textures[tex][1] & 0x0020:
 				f |= BATCH_ADDITIVE
-			mat_flags[m] = f
+			mat_flags[m] = f | (BATCH_EQUIPMENT if m in equip_mats else 0)
 		out_dir.joinpath("models", "lc").mkdir(parents=True, exist_ok=True)
 		face = None
 		if struct.unpack_from("<i", mdl, 260)[0] > 0:

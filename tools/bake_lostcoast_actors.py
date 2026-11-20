@@ -188,6 +188,7 @@ def face_track(events, face) -> tuple[bytes, float, float] | None:
 
 
 _MAP_ENTS: dict = {}     # targetname -> entity, of the map being baked
+_MAP_PAIRS: dict = {}    # targetname -> its key/value pairs in order (outputs repeat a key)
 _SEQ_SECONDS: dict = {}  # the actor's sequences: name -> seconds
 # What a sequence's script events set swinging (a scripted_sequence's
 # OnScriptEventNN exploding an env_physexplosion next to hinged props: the
@@ -268,6 +269,12 @@ def bake_scene(img: SceneImage, vcd: str, actor: str, scripts: dict, waves: set[
 	# held (SitDown, then SitDown_PostIdle). One the scene already plays as a
 	# sequence event of its own (OpenGate) is not played twice.
 	for t, n in sorted(triggers):
+		# A relay that kills <actor>_weapon: what he carries leaves his hand
+		# (relay_DropHarpoon as he reaches for his keys).
+		for tgt in (scene_outputs or {}).get(f"ontrigger{n}:trigger", []):
+			rl = _MAP_PAIRS.get(tgt.lower(), [])
+			if any(k.lower() == "ontrigger" and v.lower().startswith(f"{actor}_weapon,kill") for k, v in rl):
+				lines.append(f"body {t:.2f} {t:.2f} 1")
 		for tgt in (scene_outputs or {}).get(f"ontrigger{n}", []):
 			ssq = _MAP_ENTS.get(tgt.lower())
 			if not ssq or ssq.get("classname") != "scripted_sequence":
@@ -358,9 +365,11 @@ def main() -> int:
 	text = d[off:off + ln].decode("latin-1", "replace")
 	nscene = 0
 	for b in re.findall(r"\{[^{}]*\}", text):
-		e = dict(re.findall(r'"([^"]+)"\s+"([^"]*)"', b))
+		_pr = re.findall(r'"([^"]+)"\s+"([^"]*)"', b)
+		e = dict(_pr)
 		if e.get("targetname"):
 			_MAP_ENTS.setdefault(e["targetname"].lower(), e)
+			_MAP_PAIRS.setdefault(e["targetname"].lower(), _pr)
 	import source_studio as _ss
 
 	_fa = "models/lostcoast/fisherman/Fisherman_animations"
@@ -416,6 +425,8 @@ def main() -> int:
 			parts = [x.strip() for x in v.split(",")]
 			if k.lower().startswith("ontrigger") and len(parts) > 1 and parts[1].lower() == "beginsequence":
 				outs.setdefault(k.lower(), []).append(parts[0])
+			elif k.lower().startswith("ontrigger") and len(parts) > 1 and parts[1].lower() == "trigger":
+				outs.setdefault(k.lower() + ":trigger", []).append(parts[0])
 		s = bake_scene(img, vcd, "fisherman", scripts, waves, outs)
 		if s:
 			(out / "scripts" / "lc" / (Path(vcd).stem.lower() + ".txt")).write_text(s)
