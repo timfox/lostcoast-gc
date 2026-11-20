@@ -189,6 +189,16 @@ def face_track(events, face) -> tuple[bytes, float, float] | None:
 
 _MAP_ENTS: dict = {}     # targetname -> entity, of the map being baked
 _SEQ_SECONDS: dict = {}  # the actor's sequences: name -> seconds
+# What a sequence's script events set swinging (a scripted_sequence's
+# OnScriptEventNN exploding an env_physexplosion next to hinged props: the
+# harbor gate): name -> [(seconds into it, hinge, degrees a second, stop)].
+_SEQ_HINGES: dict = {}
+
+
+def _hinge_lines(play: str, t: float) -> list[str]:
+	return [f"hinge {t + dt:.2f} {t + dt:.2f} @{h[0]:g},{h[1]:g},{h[2]:g},{spin:.1f},{stop:g}"
+		for dt, h, spin, stop in _SEQ_HINGES.get(play.lower(), [])]
+
 
 
 def bake_scene(img: SceneImage, vcd: str, actor: str, scripts: dict, waves: set[str], scene_outputs: dict | None = None) -> str | None:
@@ -243,6 +253,7 @@ def bake_scene(img: SceneImage, vcd: str, actor: str, scripts: dict, waves: set[
 					lines.append(f"gesture {e.start:.2f} {e.end:.2f} {e.param1}{tags}")
 				elif e.type == "sequence" and e.param1:
 					lines.append(f"sequence {e.start:.2f} {e.end:.2f} seq_{e.param1}")
+					lines += _hinge_lines(e.param1, e.start)
 					seqs_named.add(e.param1.lower())
 				elif e.type == "firetrigger":
 					lines.append(f"trigger {e.start:.2f} {e.param1}")
@@ -264,6 +275,7 @@ def bake_scene(img: SceneImage, vcd: str, actor: str, scripts: dict, waves: set[
 				continue
 			name = f"seq_{play}" + (f">seq_{post}:{_SEQ_SECONDS[post.lower()]:.2f}" if post and post.lower() in _SEQ_SECONDS else "")
 			lines.append(f"sequence {t:.2f} {t + _SEQ_SECONDS[play.lower()]:.2f} {name}")
+			lines += _hinge_lines(play, t)
 	if face_events and _FACE:
 		got = face_track(face_events, _FACE)
 		if got:
@@ -354,6 +366,43 @@ def main() -> int:
 	for _sq in _am.seqs:
 		_an = _am.anims[_sq.anims[0]]
 		_SEQ_SECONDS[_sq.label.lower()] = (_an.numframes - 1) / _an.fps
+	# Script events of his sequences (mstudioevent_t, event 1003 with the
+	# number as its option) and what the map hangs on them.
+	import hinge_swing
+	from bake_lostcoast_props import _static_props
+
+	_md = read_first(vpks, _fa + ".mdl")
+	_ns, _si = struct.unpack_from("<ii", _md, 188)
+	_events: dict = {}
+	for _i in range(_ns):
+		_o = _si + _i * 212
+		_lab = _o + struct.unpack_from("<i", _md, _o + 4)[0]
+		_ne, _ei = struct.unpack_from("<ii", _md, _o + 24)
+		for _k in range(_ne):
+			_e = _o + _ei + _k * 80
+			_cyc, _ev = struct.unpack_from("<fi", _md, _e)
+			if _ev == 1003:
+				_events.setdefault(_md[_lab:_md.index(b"\0", _lab)].decode().lower(), {})[
+					_md[_e + 12:_e + 76].split(b"\0")[0].decode("latin-1").strip()] = _cyc
+	_all = [dict(re.findall(r'"([^"]+)"\s+"([^"]*)"', b)) for b in re.findall(r"\{[^{}]*\}", text)]
+	_props = None
+	for b in re.findall(r"\{[^{}]*\}", text):
+		pairs = re.findall(r'"([^"]+)"\s+"([^"]*)"', b)
+		e = dict(pairs)
+		play = e.get("m_iszPlay", "").lower()
+		if e.get("classname") != "scripted_sequence" or play not in _SEQ_SECONDS:
+			continue
+		for k, v in pairs:
+			m = re.fullmatch(r"onscriptevent0*(\d+)", k.lower())
+			parts = [x.strip() for x in v.split(",")]
+			if not m or len(parts) < 4 or parts[1].lower() != "explode" or m.group(1) not in _events.get(play, {}):
+				continue
+			if _props is None:
+				_props = _static_props(d)
+			at = _events[play][m.group(1)] * _SEQ_SECONDS[play] + float(parts[3] or 0)
+			for h, spin, stop in hinge_swing.swings_of(d, _all, parts[0], lambda p: read_first(vpks, p), _props):
+				_SEQ_HINGES.setdefault(play, []).append((at, h, spin, stop))
+				print(f"  hinge: {play} +{at:.2f} s swings the leaf at {h[0]:g} {h[1]:g}: {spin:.1f} deg/s to {stop:g}")
 	for b in re.findall(r"\{[^{}]*\}", text):
 		pairs = re.findall(r'"([^"]+)"\s+"([^"]*)"', b)
 		e = dict(pairs)
