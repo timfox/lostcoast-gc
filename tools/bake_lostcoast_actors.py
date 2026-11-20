@@ -196,8 +196,10 @@ _SEQ_HINGES: dict = {}
 
 
 def _hinge_lines(play: str, t: float) -> list[str]:
-	return [f"hinge {t + dt:.2f} {t + dt:.2f} @{h[0]:g},{h[1]:g},{h[2]:g},{spin:.1f},{stop:g}"
-		for dt, h, spin, stop in _SEQ_HINGES.get(play.lower(), [])]
+	# (hinge, degrees a second, stop angle, then the shut leaf's box: the
+	# game stands a solid there until the leaf swings)
+	return [f"hinge {t + dt:.2f} {t + dt:.2f} @{h[0]:.0f},{h[1]:.0f},{h[2]:.0f},{spin:.1f},{stop:g}," + ",".join(f"{x:.0f}" for x in box)
+		for dt, h, spin, stop, box in _SEQ_HINGES.get(play.lower(), [])]
 
 
 
@@ -400,8 +402,8 @@ def main() -> int:
 			if _props is None:
 				_props = _static_props(d)
 			at = _events[play][m.group(1)] * _SEQ_SECONDS[play] + float(parts[3] or 0)
-			for h, spin, stop in hinge_swing.swings_of(d, _all, parts[0], lambda p: read_first(vpks, p), _props):
-				_SEQ_HINGES.setdefault(play, []).append((at, h, spin, stop))
+			for h, spin, stop, box in hinge_swing.swings_of(d, _all, parts[0], lambda p: read_first(vpks, p), _props):
+				_SEQ_HINGES.setdefault(play, []).append((at, h, spin, stop, box))
 				print(f"  hinge: {play} +{at:.2f} s swings the leaf at {h[0]:g} {h[1]:g}: {spin:.1f} deg/s to {stop:g}")
 	for b in re.findall(r"\{[^{}]*\}", text):
 		pairs = re.findall(r'"([^"]+)"\s+"([^"]*)"', b)

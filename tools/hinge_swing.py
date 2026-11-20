@@ -162,7 +162,7 @@ def swing(bsp: bytes, hinge, centre, zlo: float, zhi: float, mass: float, explos
 
 def swings_of(bsp: bytes, ents: list[dict], explosion_name: str, read, static_props=()) -> list:
 	"""Every hinged prop the named env_physexplosion pushes:
-	[((x, y, z) of the hinge, degrees a second, stop angle)].
+	[((x, y, z) of the hinge, degrees a second, stop angle, shut box)].
 
 	ents: the map's entities as dicts; read(path) -> file bytes or None;
 	static_props: [(model, origin, angles)], which stop a leaf with their hulls."""
@@ -217,5 +217,10 @@ def swings_of(bsp: bytes, ents: list[dict], explosion_name: str, read, static_pr
 			continue
 		got = swing(bsp, hp, centre, org[2] + lo[2], org[2] + hi[2], mass, ex, solids)
 		if got:
-			out.append((tuple(hp), got[0], got[1]))
+			# and the leaf's box while it is shut: what stands in the way
+			cy, sy = math.cos(yaw), math.sin(yaw)
+			pts = [(org[0] + x * cy - y * sy, org[1] + x * sy + y * cy) for x in (lo[0], hi[0]) for y in (lo[1], hi[1])]
+			box = (min(p[0] for p in pts), min(p[1] for p in pts), org[2] + lo[2],
+				max(p[0] for p in pts), max(p[1] for p in pts), org[2] + hi[2])
+			out.append((tuple(hp), got[0], got[1], box))
 	return out
