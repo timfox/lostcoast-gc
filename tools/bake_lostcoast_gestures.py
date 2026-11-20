@@ -227,12 +227,16 @@ def bake(out: Path, names_wanted: list[str]) -> None:
 			pose = anim.sample(si, f / (nf - 1) * 0.9999)
 			frames.append([ss.quat_mul(qconj(bq[b]), pose[b][1]) if b in pose else ID for b in range(anim.nb)])
 			moves.append([tuple(pose[b][0][i] - bp[b][i] for i in range(3)) if b in pose else (0.0, 0.0, 0.0) for b in range(anim.nb)])
+		# The right-hand attachment bone stays in, turned and moved: what he
+		# holds rides on it. OpenGate takes it from the harpoon's grip to
+		# his pocket and into his palm, which is where the keys are.
+		held = [b for b in range(anim.nb) if "anim_attachment_rh" in bnames[b].lower()]
 		peak = {b: max(2 * math.degrees(math.acos(min(1.0, abs(fr[b][3])))) for fr in frames) for b in range(anim.nb)
-			if not any(x in bnames[b].lower() for x in SKIP_BONES)}
-		keep = sorted((b for b in peak if peak[b] >= MIN_DEG), key=lambda b: -peak[b])[:48]
+			if b in held or not any(x in bnames[b].lower() for x in SKIP_BONES)}
+		keep = sorted((b for b in peak if peak[b] >= MIN_DEG and b not in held), key=lambda b: -peak[b])[:48 - len(held)] + held
 		keep.sort()
 		far = {b: max(math.sqrt(sum(c * c for c in mv[b])) for mv in moves) for b in peak}
-		pkeep = sorted((b for b in far if far[b] >= MIN_MOVE), key=lambda b: -far[b])[:MAX_POS]
+		pkeep = sorted((b for b in far if far[b] >= MIN_MOVE), key=lambda b: (b not in held, -far[b]))[:MAX_POS]
 		for b in keep + pkeep:
 			if b not in used:
 				used.append(b)

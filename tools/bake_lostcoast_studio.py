@@ -102,11 +102,7 @@ EQUIPMENT = {"fisherman": [("models/lostcoast/fisherman/harpoon", None, 0x08)]}
 # for a while (prop_dynamic keys on anim_attachment_RH, shown while he
 # unlocks the gate): baked the same way on the attachment's bone, drawn only
 # while the game says so (BATCH_HELD).
-# (The fisherman's keys are not listed yet: baked this way they showed by
-# his thigh rather than in his hand in the emulator, so they wait until the
-# attachment bone's motion in OpenGate is carried too.
-#   "fisherman": [("models/lostcoast/fisherman/keys", "anim_attachment_RH", 0x10)])
-HELD: dict = {}
+HELD = {"fisherman": [("models/lostcoast/fisherman/keys", "anim_attachment_RH", 0x10)]}
 
 # Characters that look at things through Source's head/spine/body pose params.
 LOOK_MODELS = {"fisherman"}
