@@ -1410,6 +1410,31 @@ def _fisherman_keys(src_bsp: Path, ents: list[dict], by_name: dict, name: str, a
 							keys["lc_lead_goal"] = f"{o[0]:g} {o[1]:g} {o[2]:g} {yaw:g}"
 						keys["lc_lead_dist"] = g.get("LeadDistance", "64")
 						keys["lc_retrieve_dist"] = g.get("RetrieveDistance", "96")
+	# The scene that begins his scripted_sequences (opening the gate, sitting
+	# down) and the trigger that starts it, wherever it is.
+	gate_best = None
+	# (by scene file: lcs_fisherman_keys names no target1)
+	his = {e.get("targetname", "").lower(): e for e in ents
+		if e.get("classname") == "logic_choreographed_scene" and "fisherman" in e.get("SceneFile", "").lower()}
+	for e in ents:
+		if e.get("classname") != "trigger_once":
+			continue
+		for _k, v in _outputs(e):
+			parts = [x.strip() for x in v.split(",")]
+			sc = his.get(parts[0].lower()) if len(parts) > 1 and parts[1].lower() == "start" else None
+			if not sc or not any(k2.startswith("ontrigger") and "beginsequence" in v2.lower() for k2, v2 in _outputs(sc)):
+				continue
+			bb = _brush_bounds(src_bsp, e)
+			if not bb or "lc_lead_goal" not in keys:
+				continue
+			# (the one at the end of the lead: lcs_leadtogate, on the rocks,
+			# begins sequences too)
+			goal = [float(x) for x in keys["lc_lead_goal"].split()[:3]]
+			dist = math.dist(((bb[0] + bb[3]) / 2, (bb[1] + bb[4]) / 2, (bb[2] + bb[5]) / 2), goal)
+			if gate_best is None or dist < gate_best:
+				gate_best = dist
+				keys["lc_gate_trigger"] = " ".join(f"{x:g}" for x in bb)
+				keys["lc_gate_scene"] = "scripts/lc/" + Path(sc["SceneFile"].replace("\\", "/")).stem.lower() + ".txt"
 	keys["lc_nodes"] = f"scripts/lc/{src_bsp.stem.lower()}.lcng"
 	keys["lc_talker"] = "scripts/lc/fisherman_talker.txt"
 	return keys

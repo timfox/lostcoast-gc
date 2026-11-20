@@ -187,13 +187,19 @@ def face_track(events, face) -> tuple[bytes, float, float] | None:
 	return struct.pack(">4sHHHH", b"GCFT", 2, len(keys), n, int(FACE_HZ * 256)) + bytes(rows), t0, t1
 
 
-def bake_scene(img: SceneImage, vcd: str, actor: str, scripts: dict, waves: set[str]) -> str | None:
+_MAP_ENTS: dict = {}     # targetname -> entity, of the map being baked
+_SEQ_SECONDS: dict = {}  # the actor's sequences: name -> seconds
+
+
+def bake_scene(img: SceneImage, vcd: str, actor: str, scripts: dict, waves: set[str], scene_outputs: dict | None = None) -> str | None:
 	sc = img.scene(vcd)
 	if not sc:
 		return None
 	lines = [f"// {vcd} (scenes.image), actor {actor}"]
 	end = 0.0
 	face_events = []
+	seqs_named: set = set()
+	triggers: list = []
 	for e in sc.events:
 		if e.type == "stoppoint":
 			end = e.start
@@ -216,7 +222,16 @@ def bake_scene(img: SceneImage, vcd: str, actor: str, scripts: dict, waves: set[
 				elif e.type in ("lookat", "face"):
 					lines.append(f"{e.type} {e.start:.2f} {e.end:.2f} {e.param1}")
 				elif e.type == "moveto":
-					lines.append(f"moveto {e.start:.2f} {e.end:.2f} {e.param1} {e.distance:g} {e.param2 or 'Walk'}")
+					# A named target (a scripted_sequence, a path marker) is
+					# written as its place and facing: those entities do not
+					# exist in the GameCube map.
+					tgt = e.param1
+					me = _MAP_ENTS.get(tgt.lower())
+					if me and "origin" in me:
+						o = me["origin"].split()
+						yaw = (me.get("angles", "0 0 0").split() + ["0", "0"])[1]
+						tgt = f"@{float(o[0]):g},{float(o[1]):g},{float(o[2]):g},{float(yaw):g}"
+					lines.append(f"moveto {e.start:.2f} {e.end:.2f} {tgt} {e.distance:g} {e.param2 or 'Walk'}")
 				elif e.type == "gesture" and e.param1:
 					# Timing tags: where the scene puts each of the sequence's own
 					# marks (apex, accent, loop, end). Pairs of playback fraction
@@ -227,12 +242,28 @@ def bake_scene(img: SceneImage, vcd: str, actor: str, scripts: dict, waves: set[
 					tags = "".join(f" {p:.3f} {o:.3f}" for p, o in pairs)
 					lines.append(f"gesture {e.start:.2f} {e.end:.2f} {e.param1}{tags}")
 				elif e.type == "sequence" and e.param1:
-					lines.append(f"sequence {e.start:.2f} {e.end:.2f} {e.param1}")
+					lines.append(f"sequence {e.start:.2f} {e.end:.2f} seq_{e.param1}")
+					seqs_named.add(e.param1.lower())
 				elif e.type == "firetrigger":
 					lines.append(f"trigger {e.start:.2f} {e.param1}")
+					triggers.append((e.start, e.param1))
 				elif e.type == "flexanimation" and e.flex and e.name.lower() != "head":
 					# (the "head" tracks turn the head bone, not the face)
 					face_events.append(e)
+	# The scene entity's OnTriggerN outputs that begin a scripted_sequence on
+	# him: the sequence at the trigger's time, then the entity's post-idle
+	# held (SitDown, then SitDown_PostIdle). One the scene already plays as a
+	# sequence event of its own (OpenGate) is not played twice.
+	for t, n in sorted(triggers):
+		for tgt in (scene_outputs or {}).get(f"ontrigger{n}", []):
+			ssq = _MAP_ENTS.get(tgt.lower())
+			if not ssq or ssq.get("classname") != "scripted_sequence":
+				continue
+			play, post = ssq.get("m_iszPlay", ""), ssq.get("m_iszPostIdle", "")
+			if not play or play.lower() in seqs_named or play.lower() not in _SEQ_SECONDS:
+				continue
+			name = f"seq_{play}" + (f">seq_{post}:{_SEQ_SECONDS[post.lower()]:.2f}" if post and post.lower() in _SEQ_SECONDS else "")
+			lines.append(f"sequence {t:.2f} {t + _SEQ_SECONDS[play.lower()]:.2f} {name}")
 	if face_events and _FACE:
 		got = face_track(face_events, _FACE)
 		if got:
@@ -314,10 +345,27 @@ def main() -> int:
 	nscene = 0
 	for b in re.findall(r"\{[^{}]*\}", text):
 		e = dict(re.findall(r'"([^"]+)"\s+"([^"]*)"', b))
+		if e.get("targetname"):
+			_MAP_ENTS.setdefault(e["targetname"].lower(), e)
+	import source_studio as _ss
+
+	_fa = "models/lostcoast/fisherman/Fisherman_animations"
+	_am = _ss.read_studio(read_first(vpks, _fa + ".mdl"), read_first(vpks, _fa + ".ani"))
+	for _sq in _am.seqs:
+		_an = _am.anims[_sq.anims[0]]
+		_SEQ_SECONDS[_sq.label.lower()] = (_an.numframes - 1) / _an.fps
+	for b in re.findall(r"\{[^{}]*\}", text):
+		pairs = re.findall(r'"([^"]+)"\s+"([^"]*)"', b)
+		e = dict(pairs)
 		if e.get("classname") != "logic_choreographed_scene" or "fisherman" not in e.get("SceneFile", ""):
 			continue
 		vcd = e["SceneFile"].replace("\\", "/")
-		s = bake_scene(img, vcd, "fisherman", scripts, waves)
+		outs: dict = {}
+		for k, v in pairs:
+			parts = [x.strip() for x in v.split(",")]
+			if k.lower().startswith("ontrigger") and len(parts) > 1 and parts[1].lower() == "beginsequence":
+				outs.setdefault(k.lower(), []).append(parts[0])
+		s = bake_scene(img, vcd, "fisherman", scripts, waves, outs)
 		if s:
 			(out / "scripts" / "lc" / (Path(vcd).stem.lower() + ".txt")).write_text(s)
 			nscene += 1

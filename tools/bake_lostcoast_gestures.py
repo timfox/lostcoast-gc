@@ -47,6 +47,8 @@ HZ = 10.0
 MIN_DEG = 1.0
 MIN_MOVE = 0.1   # units: bones that move less carry rotation only
 MAX_POS = 8
+# scripted_sequence animations baked as streamed tracks (see bake()).
+SEQUENCES = ("OpenGate", "SitDown", "SitDown_PostIdle")
 SKIP_BONES = ("anim_attachment", "valvebiped.forward")
 vpks = None
 
@@ -206,6 +208,37 @@ def bake(out: Path, names_wanted: list[str]) -> None:
 			if b not in used:
 				used.append(b)
 		gest.append((g, dur, keep, frames, pkeep, moves, far))
+	# Whole-body sequences the map plays through scripted_sequence entities
+	# (the fisherman opens the gate, sits down). In the studio model they
+	# would cost the studio arena 45 KB and more each; as tracks here they
+	# stream from ARAM two frames at a time. Stored like a gesture: what the
+	# sequence's pose adds over the talking pose, for the bones it turns most
+	# (the engine takes 48 a track) and the bones it moves.
+	for sname in SEQUENCES:
+		if sname.lower() not in anim.by:
+			print(f"  sequence {sname}: not in the model, skipped")
+			continue
+		si = anim.by[sname.lower()]
+		a = anim.am.anims[anim.am.seqs[si].anims[0]]
+		dur = (a.numframes - 1) / a.fps
+		nf = max(2, int(round(dur * HZ)) + 1)
+		frames, moves = [], []
+		for f in range(nf):
+			pose = anim.sample(si, f / (nf - 1) * 0.9999)
+			frames.append([ss.quat_mul(qconj(bq[b]), pose[b][1]) if b in pose else ID for b in range(anim.nb)])
+			moves.append([tuple(pose[b][0][i] - bp[b][i] for i in range(3)) if b in pose else (0.0, 0.0, 0.0) for b in range(anim.nb)])
+		peak = {b: max(2 * math.degrees(math.acos(min(1.0, abs(fr[b][3])))) for fr in frames) for b in range(anim.nb)
+			if not any(x in bnames[b].lower() for x in SKIP_BONES)}
+		keep = sorted((b for b in peak if peak[b] >= MIN_DEG), key=lambda b: -peak[b])[:48]
+		keep.sort()
+		far = {b: max(math.sqrt(sum(c * c for c in mv[b])) for mv in moves) for b in peak}
+		pkeep = sorted((b for b in far if far[b] >= MIN_MOVE), key=lambda b: -far[b])[:MAX_POS]
+		for b in keep + pkeep:
+			if b not in used:
+				used.append(b)
+		gest.append(("seq_" + sname, dur, keep, frames, pkeep, moves, far))
+		print(f"  sequence {sname}: {dur:.1f} s, {nf} frames, {len(keep)} bones turned (of {sum(1 for b in peak if peak[b] >= MIN_DEG)}), "
+			f"{len(pkeep)} moved, largest move {max(far.values()):.0f} units")
 	# Look-at pose parameters (head_yaw, head_pitch, spine_yaw, body_yaw): each
 	# is a three-way blend sequence of delta poses at the parameter's low end,
 	# middle and high end. Kept as three-frame tracks "look_<pose>" whose
