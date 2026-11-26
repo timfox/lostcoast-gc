@@ -4,7 +4,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
-ENGINE_DEFAULT="/run/media/tim/Expansion1/xash3d-gc"
+ENGINE_DEFAULT="/run/media/tim/Expansion/xash3d-gc"
 STEAM_HL2_DEFAULT="/home/tim/snap/steam/common/.local/share/Steam/steamapps/common/Half-Life 2"
 
 ENGINE="${LCGC_ENGINE_TARGET:-$ENGINE_DEFAULT}"
