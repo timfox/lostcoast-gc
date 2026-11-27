@@ -1486,6 +1486,36 @@ def _fisherman_keys(src_bsp: Path, ents: list[dict], by_name: dict, name: str, a
 								keys["lc_nag_trigger"] = " ".join(f"{x:g}" for x in nb)
 								keys["lc_nag_concept"] = sp["concept"]
 								keys["lc_nag_delay"] = f"{float(p2[3] or 0):g} {sp.get('delaymin', '15')} {sp.get('delaymax', '135')} {tg.get('wait', '1')}"
+	# Every other trigger that starts one of his scenes and nothing more
+	# (no scripted_sequence): his shouts up to the player on the cliff path
+	# (lcs_fisherman_cliffclimb01/02). A trigger_once is a box; a trigger_look
+	# also needs the player to look at its target. lc_cueN = "box scene" or
+	# "box scene x y z fov looktime timeout".
+	taken = {keys.get("lc_scene"), keys.get("lc_gate_scene")}
+	ncue = 0
+	for e in ents:
+		cls = e.get("classname")
+		if cls not in ("trigger_once", "trigger_look") or e.get("StartDisabled", "0") == "1":
+			continue
+		for _k, v in _outputs(e):
+			parts = [x.strip() for x in v.split(",")]
+			sc = his.get(parts[0].lower()) if len(parts) > 1 and parts[1].lower() == "start" else None
+			if not sc or any("beginsequence" in v2.lower() for _k2, v2 in _outputs(sc)):
+				continue
+			scene = "scripts/lc/" + Path(sc["SceneFile"].replace("\\", "/")).stem.lower() + ".txt"
+			bb = _brush_bounds(src_bsp, e)
+			if scene in taken or not bb or ncue >= 4:
+				continue
+			cue = " ".join(f"{x:g}" for x in bb) + " " + scene
+			if cls == "trigger_look":
+				tgt = (by_name.get(e.get("target", "").lower()) or [None])[0]
+				if not tgt:
+					continue
+				o = _parse3(tgt.get("origin", "0 0 0"))
+				cue += f" {o[0]:g} {o[1]:g} {o[2]:g} {e.get('FieldOfView', '0.9')} {e.get('LookTime', '0.5')} {e.get('Timeout', '0')}"
+			keys[f"lc_cue{ncue}"] = cue
+			taken.add(scene)
+			ncue += 1
 	keys["lc_nodes"] = f"scripts/lc/{src_bsp.stem.lower()}.lcng"
 	keys["lc_talker"] = "scripts/lc/fisherman_talker.txt"
 	return keys
