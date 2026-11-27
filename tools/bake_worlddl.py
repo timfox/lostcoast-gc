@@ -1290,10 +1290,12 @@ def bake(map_bsp: Path, out_dir: Path, max_disp_power: int) -> None:
 		hosts = [h for h in all_hosts if h in face_ctx]
 		disp_hosts = [h for h in all_hosts if h in disp_ctx]
 		if not (hosts or disp_hosts) or not (0 <= oti < len(bsp.texinfos)):
+			print(f"  overlay {oi}: no host face (faces {list(all_hosts)})")
 			continue
 		oti_rec = bsp.texinfos[oti]
 		omat = mat_for(oti_rec[5], oti_rec[4])
 		if omat is None:
+			print(f"  overlay {oi}: no material for texinfo {oti}")
 			continue
 		if not hosts:
 			_U = struct.unpack_from("<2f", r, 264)
@@ -1308,6 +1310,8 @@ def bake(map_bsp: Path, out_dir: Path, max_disp_power: int) -> None:
 					[(_U[0], _V[0]), (_U[0], _V[1]), (_U[1], _V[1]), (_U[1], _V[0])]):
 				n_overlays += 1
 				n_overlays_disp += 1
+			else:
+				print(f"  overlay {oi}: cuts no displaced triangle (displacements {disp_hosts})")
 			continue
 		U = struct.unpack_from("<2f", r, 264)
 		V = struct.unpack_from("<2f", r, 272)
@@ -1402,6 +1406,7 @@ def bake(map_bsp: Path, out_dir: Path, max_disp_power: int) -> None:
 								if inside:
 									dbest = (abs(dist), pr, tn if tn[2] >= 0 else tuple(-c for c in tn))
 				if not dbest:
+					print(f"  infodecal {dec['texture']} at {org[0]:g} {org[1]:g} {org[2]:g}: no surface under it")
 					continue
 				_d, ctr, hn = dbest
 				upv = (0.0, 1.0, 0.0) if abs(hn[2]) > 0.99 else (0.0, 0.0, 1.0)
