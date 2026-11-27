@@ -64,6 +64,11 @@ MODELS = {
 			("crouchidle", "CrouchIdle", None),
 			("walk", "Walk_all", "walk"),
 			("run", "RunALL", "run"),
+			# the fight: a standing SMG burst, a hit, and where he lies
+			# (Source drops a ragdoll; deathpose_back is its rest pose)
+			("shoot", "shootSMG1s", None),
+			("flinch", "flinchsmall", None),
+			("dead", "deathpose_back", None),
 		],
 	),
 	"combine_super_soldier": (
