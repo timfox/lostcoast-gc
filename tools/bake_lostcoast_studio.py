@@ -97,7 +97,11 @@ MODELS = {
 # NPC weapons (additionalequipment) whose world model's root bone is one of
 # the character's own bones: Source bone-merges them, so they bake straight
 # into the character's actor mesh on that bone (one draw, no extra entity).
-EQUIPMENT = {"fisherman": [("models/lostcoast/fisherman/harpoon", None, 0x08)]}
+EQUIPMENT = {"fisherman": [("models/lostcoast/fisherman/harpoon", None, 0x08)],
+	# additionalequipment: 18 of the map's 23 soldiers carry weapon_smg1
+	# (3 a shotgun, 2 the AR2, the elite's among them); one mesh a model.
+	"combine_soldier": [("models/weapons/w_smg1", None, 0x08)],
+	"combine_super_soldier": [("models/weapons/w_irifle", None, 0x08)]}
 # Props the map parents to one of the character's attachments and turns on
 # for a while (prop_dynamic keys on anim_attachment_RH, shown while he
 # unlocks the gate): baked the same way on the attachment's bone, drawn only
@@ -1073,6 +1077,19 @@ def convert(vpks, name: str, lod: int, tex_max: int, out_dir: Path, flip: bool, 
 				bmap = [hit[0]] * len(esrc.bones)
 			elif emdl and evvd and evtx and bmap and bmap[0] >= 0:
 				etris, epos, enrm, euv, evb, _, _ids = lod_geometry(emdl, evvd, evtx, 0, esrc.bones)
+			elif emdl and evvd and evtx and any(b >= 0 for b in bmap):
+				# Bone-merged on the first bone both skeletons share (a
+				# soldier's SMG: its root "ValveBiped" and Weapon_bone are not
+				# his, its R_Hand is): the whole weapon rides that bone, placed
+				# as the weapon model's own bind pose has it.
+				mb = next(i for i, b in enumerate(bmap) if b >= 0)
+				ident = [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]]
+				flat = [dataclasses.replace(b, pose_to_bone=ident) for b in esrc.bones]
+				etris, epos, enrm, euv, evb, _, _ids = lod_geometry(emdl, evvd, evtx, 0, flat)
+				p2b = esrc.bones[mb].pose_to_bone
+				epos = [ss.mat34_xform(p2b, p) for p in epos]
+				enrm = [ss.mat34_rotate(p2b, n) for n in enrm]
+				bmap = [bmap[mb]] * len(esrc.bones)
 			else:
 				continue
 			if True:
