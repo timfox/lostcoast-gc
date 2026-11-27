@@ -1614,6 +1614,52 @@ def npc_spawns(src_bsp: Path, have: set[str]) -> list[dict]:
 						sp["keys"] = {"target": parts[2]}
 						path_starts.append(parts[2])
 		out.append(sp)
+	# Soldier squads a point_template spawns when the player walks into a
+	# trigger_once or looks at a trigger_look's target (ForceSpawn): the
+	# cliff path's first squads. Each soldier stands hidden at his template
+	# spot until then (monster_lc_soldier): lc_spawn = "box" or
+	# "box x y z fov looktime timeout", as the fisherman's lc_cueN.
+	squads_done: set[str] = set()
+	for e in ents:
+		tcls = e.get("classname")
+		if tcls not in ("trigger_once", "trigger_look") or e.get("StartDisabled", "0") == "1":
+			continue
+		for _k, v in _outputs(e):
+			parts = [x.strip() for x in v.split(",")]
+			if len(parts) < 2 or parts[1].lower() != "forcespawn":
+				continue
+			for pt in by_name.get(parts[0].lower(), []):
+				if pt.get("classname") != "point_template":
+					continue
+				bb = _brush_bounds(src_bsp, e)
+				if not bb:
+					continue
+				spawn = " ".join(f"{x:g}" for x in bb)
+				if tcls == "trigger_look":
+					tgt = (by_name.get(e.get("target", "").lower()) or [None])[0]
+					if not tgt:
+						continue
+					o = _parse3(tgt.get("origin", "0 0 0"))
+					spawn += f" {o[0]:g} {o[1]:g} {o[2]:g} {e.get('FieldOfView', '0.9')} {e.get('LookTime', '0.5')} {e.get('Timeout', '0')}"
+				names = [tv.lower() for tk, tv in pt.items() if tk.lower().startswith("template") and tv]
+				# (rappelling squads come down their ropes on a scripted
+				# sequence: not yet, they would stand in the air)
+				if any(x.get("classname") in ("move_rope", "scripted_sequence") for tn in names for x in by_name.get(tn, [])):
+					continue
+				# (a template two triggers spawn: the first one in the map)
+				if pt.get("targetname", "").lower() in squads_done:
+					continue
+				squads_done.add(pt.get("targetname", "").lower())
+				for tn in names:
+					for t in by_name.get(tn, []):
+						if t.get("classname") != "npc_combine_s":
+							continue
+						lc = "combine_super_soldier" if "super" in t.get("model", "").lower() else "combine_soldier"
+						if lc not in have:
+							continue
+						out.append({"model": lc, "origin": t.get("origin", "0 0 0"), "angles": t.get("angles", "0 0 0"),
+							"seq": "idle", "classname": "monster_lc_soldier",
+							"keys": {"lc_spawn": spawn, "lc_squad": pt.get("targetname", "")}})
 	# path_corner chains the characters follow, as GoldSrc path_corners
 	seen: set[str] = set()
 	for start in path_starts:
