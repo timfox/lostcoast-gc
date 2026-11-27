@@ -119,7 +119,7 @@ MAX_FPS = 15.0  # GC: sample animation at 15 Hz, r_studio interpolates frames
 # skeleton, sequences and skins; its mesh moves to <name>.gca. Flipper's
 # cost per triangle is small next to the CPU's per-bone work, so one fine
 # LOD serves every distance until the studio arena has room for a second.
-ACTOR_LODS = {"fisherman": (3,)}
+ACTOR_LODS = {"fisherman": (3,), "combine_soldier": (3,)}
 
 
 def _cstr(d: bytes, o: int) -> str:
