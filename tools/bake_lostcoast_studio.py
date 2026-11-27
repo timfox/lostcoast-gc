@@ -64,6 +64,11 @@ MODELS = {
 			("crouchidle", "CrouchIdle", None),
 			("walk", "Walk_all", "walk"),
 			("run", "RunALL", "run"),
+			# the fight: a standing SMG burst, a hit, and where he lies
+			# (Source drops a ragdoll; deathpose_back is its rest pose)
+			("shoot", "shootSMG1s", None),
+			("flinch", "flinchsmall", None),
+			("dead", "deathpose_back", None),
 		],
 	),
 	"combine_super_soldier": (
@@ -97,7 +102,11 @@ MODELS = {
 # NPC weapons (additionalequipment) whose world model's root bone is one of
 # the character's own bones: Source bone-merges them, so they bake straight
 # into the character's actor mesh on that bone (one draw, no extra entity).
-EQUIPMENT = {"fisherman": [("models/lostcoast/fisherman/harpoon", None, 0x08)]}
+EQUIPMENT = {"fisherman": [("models/lostcoast/fisherman/harpoon", None, 0x08)],
+	# additionalequipment: 18 of the map's 23 soldiers carry weapon_smg1
+	# (3 a shotgun, 2 the AR2, the elite's among them); one mesh a model.
+	"combine_soldier": [("models/weapons/w_smg1", None, 0x08)],
+	"combine_super_soldier": [("models/weapons/w_irifle", None, 0x08)]}
 # Props the map parents to one of the character's attachments and turns on
 # for a while (prop_dynamic keys on anim_attachment_RH, shown while he
 # unlocks the gate): baked the same way on the attachment's bone, drawn only
@@ -119,7 +128,7 @@ MAX_FPS = 15.0  # GC: sample animation at 15 Hz, r_studio interpolates frames
 # skeleton, sequences and skins; its mesh moves to <name>.gca. Flipper's
 # cost per triangle is small next to the CPU's per-bone work, so one fine
 # LOD serves every distance until the studio arena has room for a second.
-ACTOR_LODS = {"fisherman": (3,)}
+ACTOR_LODS = {"fisherman": (3,), "combine_soldier": (3,)}
 
 
 def _cstr(d: bytes, o: int) -> str:
@@ -1073,6 +1082,19 @@ def convert(vpks, name: str, lod: int, tex_max: int, out_dir: Path, flip: bool, 
 				bmap = [hit[0]] * len(esrc.bones)
 			elif emdl and evvd and evtx and bmap and bmap[0] >= 0:
 				etris, epos, enrm, euv, evb, _, _ids = lod_geometry(emdl, evvd, evtx, 0, esrc.bones)
+			elif emdl and evvd and evtx and any(b >= 0 for b in bmap):
+				# Bone-merged on the first bone both skeletons share (a
+				# soldier's SMG: its root "ValveBiped" and Weapon_bone are not
+				# his, its R_Hand is): the whole weapon rides that bone, placed
+				# as the weapon model's own bind pose has it.
+				mb = next(i for i, b in enumerate(bmap) if b >= 0)
+				ident = [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]]
+				flat = [dataclasses.replace(b, pose_to_bone=ident) for b in esrc.bones]
+				etris, epos, enrm, euv, evb, _, _ids = lod_geometry(emdl, evvd, evtx, 0, flat)
+				p2b = esrc.bones[mb].pose_to_bone
+				epos = [ss.mat34_xform(p2b, p) for p in epos]
+				enrm = [ss.mat34_rotate(p2b, n) for n in enrm]
+				bmap = [bmap[mb]] * len(esrc.bones)
 			else:
 				continue
 			if True:
@@ -1486,6 +1508,36 @@ def _fisherman_keys(src_bsp: Path, ents: list[dict], by_name: dict, name: str, a
 								keys["lc_nag_trigger"] = " ".join(f"{x:g}" for x in nb)
 								keys["lc_nag_concept"] = sp["concept"]
 								keys["lc_nag_delay"] = f"{float(p2[3] or 0):g} {sp.get('delaymin', '15')} {sp.get('delaymax', '135')} {tg.get('wait', '1')}"
+	# Every other trigger that starts one of his scenes and nothing more
+	# (no scripted_sequence): his shouts up to the player on the cliff path
+	# (lcs_fisherman_cliffclimb01/02). A trigger_once is a box; a trigger_look
+	# also needs the player to look at its target. lc_cueN = "box scene" or
+	# "box scene x y z fov looktime timeout".
+	taken = {keys.get("lc_scene"), keys.get("lc_gate_scene")}
+	ncue = 0
+	for e in ents:
+		cls = e.get("classname")
+		if cls not in ("trigger_once", "trigger_look") or e.get("StartDisabled", "0") == "1":
+			continue
+		for _k, v in _outputs(e):
+			parts = [x.strip() for x in v.split(",")]
+			sc = his.get(parts[0].lower()) if len(parts) > 1 and parts[1].lower() == "start" else None
+			if not sc or any("beginsequence" in v2.lower() for _k2, v2 in _outputs(sc)):
+				continue
+			scene = "scripts/lc/" + Path(sc["SceneFile"].replace("\\", "/")).stem.lower() + ".txt"
+			bb = _brush_bounds(src_bsp, e)
+			if scene in taken or not bb or ncue >= 4:
+				continue
+			cue = " ".join(f"{x:g}" for x in bb) + " " + scene
+			if cls == "trigger_look":
+				tgt = (by_name.get(e.get("target", "").lower()) or [None])[0]
+				if not tgt:
+					continue
+				o = _parse3(tgt.get("origin", "0 0 0"))
+				cue += f" {o[0]:g} {o[1]:g} {o[2]:g} {e.get('FieldOfView', '0.9')} {e.get('LookTime', '0.5')} {e.get('Timeout', '0')}"
+			keys[f"lc_cue{ncue}"] = cue
+			taken.add(scene)
+			ncue += 1
 	keys["lc_nodes"] = f"scripts/lc/{src_bsp.stem.lower()}.lcng"
 	keys["lc_talker"] = "scripts/lc/fisherman_talker.txt"
 	return keys
@@ -1584,6 +1636,52 @@ def npc_spawns(src_bsp: Path, have: set[str]) -> list[dict]:
 						sp["keys"] = {"target": parts[2]}
 						path_starts.append(parts[2])
 		out.append(sp)
+	# Soldier squads a point_template spawns when the player walks into a
+	# trigger_once or looks at a trigger_look's target (ForceSpawn): the
+	# cliff path's first squads. Each soldier stands hidden at his template
+	# spot until then (monster_lc_soldier): lc_spawn = "box" or
+	# "box x y z fov looktime timeout", as the fisherman's lc_cueN.
+	squads_done: set[str] = set()
+	for e in ents:
+		tcls = e.get("classname")
+		if tcls not in ("trigger_once", "trigger_look") or e.get("StartDisabled", "0") == "1":
+			continue
+		for _k, v in _outputs(e):
+			parts = [x.strip() for x in v.split(",")]
+			if len(parts) < 2 or parts[1].lower() != "forcespawn":
+				continue
+			for pt in by_name.get(parts[0].lower(), []):
+				if pt.get("classname") != "point_template":
+					continue
+				bb = _brush_bounds(src_bsp, e)
+				if not bb:
+					continue
+				spawn = " ".join(f"{x:g}" for x in bb)
+				if tcls == "trigger_look":
+					tgt = (by_name.get(e.get("target", "").lower()) or [None])[0]
+					if not tgt:
+						continue
+					o = _parse3(tgt.get("origin", "0 0 0"))
+					spawn += f" {o[0]:g} {o[1]:g} {o[2]:g} {e.get('FieldOfView', '0.9')} {e.get('LookTime', '0.5')} {e.get('Timeout', '0')}"
+				names = [tv.lower() for tk, tv in pt.items() if tk.lower().startswith("template") and tv]
+				# (rappelling squads come down their ropes on a scripted
+				# sequence: not yet, they would stand in the air)
+				if any(x.get("classname") in ("move_rope", "scripted_sequence") for tn in names for x in by_name.get(tn, [])):
+					continue
+				# (a template two triggers spawn: the first one in the map)
+				if pt.get("targetname", "").lower() in squads_done:
+					continue
+				squads_done.add(pt.get("targetname", "").lower())
+				for tn in names:
+					for t in by_name.get(tn, []):
+						if t.get("classname") != "npc_combine_s":
+							continue
+						lc = "combine_super_soldier" if "super" in t.get("model", "").lower() else "combine_soldier"
+						if lc not in have:
+							continue
+						out.append({"model": lc, "origin": t.get("origin", "0 0 0"), "angles": t.get("angles", "0 0 0"),
+							"seq": "idle", "classname": "monster_lc_soldier",
+							"keys": {"lc_spawn": spawn, "lc_squad": pt.get("targetname", "")}})
 	# path_corner chains the characters follow, as GoldSrc path_corners
 	seen: set[str] = set()
 	for start in path_starts:
